@@ -165,31 +165,11 @@ class _LoginScreenState extends State<LoginScreen> {
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
 
-  Future<void> _logout(BuildContext context) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('تغيير اليوزر؟'),
-        content: const Text('الداتا هتفضل محفوظة، بس هتحتاج تكتب اليوزر تاني.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('إلغاء')),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('تأكيد')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('username');
-    if (!context.mounted) return;
-    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginScreen()));
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: Text('المحل: ${Store.user}'),
-        actions: [IconButton(icon: const Icon(Icons.logout), onPressed: () => _logout(context))],
       ),
       body: Center(
         child: ConstrainedBox(
@@ -245,14 +225,14 @@ class InventoryScreen extends StatelessWidget {
           if (items.isEmpty) return const Center(child: Text('مفيش منتجات لسه'));
           final totals = <int, double>{};
           for (final i in items) {
-            totals[i.karat] = (totals[i.karat] ?? 0) + i.remaining;
+            totals[i.karat] = (totals[i.karat] ?? 0.0) + i.remaining;
           }
           return Column(children: [
             Padding(
               padding: const EdgeInsets.all(8),
               child: Wrap(spacing: 8, children: [
                 for (final k in karatsOf(metal))
-                  Chip(label: Text('عيار $k: ${(totals[k] ?? 0).toStringAsFixed(2)} جم')),
+                  Chip(label: Text('عيار $k: ${(totals[k] ?? 0.0).toStringAsFixed(2)} جم')),
               ]),
             ),
             const Divider(height: 1),
@@ -911,10 +891,10 @@ class _SellScreenState extends State<SellScreen> {
   final Set<int> picked = {};
 
   double get weight => byPiece
-      ? picked.fold<double>(0, (a, n) => a + (item?.weights[n] ?? 0))
-      : (parseNum(w) ?? 0);
-  double get feeTotal => (parseNum(fee) ?? 0) * (feePerGram ? weight : 1);
-  double get total => weight * (parseNum(price) ?? 0) + feeTotal;
+      ? picked.fold<double>(0, (a, n) => a + (item?.weights[n] ?? 0.0))
+      : (parseNum(w) ?? 0.0);
+  double get feeTotal => (parseNum(fee) ?? 0.0) * (feePerGram ? weight : 1.0);
+  double get total => weight * (parseNum(price) ?? 0.0) + feeTotal;
 
   void _err(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
 
@@ -1076,8 +1056,8 @@ class _BuyScreenState extends State<BuyScreen> {
   void _err(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
 
   double get debt {
-    final pr = parseNum(price) ?? 0;
-    final pd = paid.text.trim().isEmpty ? pr : (parseNum(paid) ?? 0);
+    final pr = parseNum(price) ?? 0.0;
+    final pd = paid.text.trim().isEmpty ? pr : (parseNum(paid) ?? 0.0);
     return pr - pd;
   }
 
@@ -1226,13 +1206,13 @@ class MultiData {
     final m = <String, double>{};
     for (final p in payments) {
       final k = p['refId'] as String;
-      m[k] = (m[k] ?? 0) + nd(p['amount']);
+      m[k] = (m[k] ?? 0.0) + nd(p['amount']);
     }
     paySum = m;
   }
 
   double restOf(Map<String, dynamic> m, bool isSale) =>
-      nd(isSale ? m['total'] : m['price']) - nd(m['paid']) - (paySum[m['id'] as String] ?? 0);
+      nd(isSale ? m['total'] : m['price']) - nd(m['paid']) - (paySum[m['id'] as String] ?? 0.0);
 
   Item? itemById(String id) {
     for (final i in items) {
@@ -1256,9 +1236,9 @@ class _MultiState extends State<Multi> {
   final subs = <StreamSubscription<dynamic>>[];
   final ready = <String>{};
 
-  void _listen<T>(String key, Stream<T> st, void Function(T) set) {
+  void _listen<T>(String key, Stream<T> st, void Function(T) assign) {
     subs.add(st.listen((v) {
-      set(v);
+      assign(v);
       d.refresh();
       ready.add(key);
       if (mounted) setState(() {});
@@ -1386,7 +1366,7 @@ Future<void> editOp(BuildContext context, Map<String, dynamic> m, bool isSale, M
       return err('قيم غير صحيحة');
     }
     final total = nd(m['weight']) * ppg + fee;
-    if (paid + (d.paySum[id] ?? 0) > total + 0.005) return err('المدفوع أكبر من الإجمالي الجديد');
+    if (paid + (d.paySum[id] ?? 0.0) > total + 0.005) return err('المدفوع أكبر من الإجمالي الجديد');
     Ops.col('sales').doc(id).update({
       'pricePerGram': ppg,
       'fee': fee,
@@ -1406,7 +1386,7 @@ Future<void> editOp(BuildContext context, Map<String, dynamic> m, bool isSale, M
     final price = pn(r['سعر الشراء الإجمالي']);
     final paid = pn(r['المبلغ المدفوع وقت الشراء']);
     if (price == null || price <= 0 || paid == null || paid < 0) return err('قيم غير صحيحة');
-    if (paid + (d.paySum[id] ?? 0) > price + 0.005) return err('المدفوع أكبر من السعر الجديد');
+    if (paid + (d.paySum[id] ?? 0.0) > price + 0.005) return err('المدفوع أكبر من السعر الجديد');
     Ops.col('purchases').doc(id).update({
       'price': price,
       'paid': paid,
@@ -1490,7 +1470,7 @@ void opActions(BuildContext context, Map<String, dynamic> m, bool isSale, MultiD
 
 Widget opTile(BuildContext context, Map<String, dynamic> m, bool isSale, MultiData d) {
   final amount = nd(isSale ? m['total'] : m['price']);
-  final extra = d.paySum[m['id'] as String] ?? 0;
+  final extra = d.paySum[m['id'] as String] ?? 0.0;
   final paid = nd(m['paid']) + extra;
   final rest = amount - paid;
   final who = [m['customerName'], m['customerPhone']]
