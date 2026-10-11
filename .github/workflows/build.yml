@@ -5,6 +5,8 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
