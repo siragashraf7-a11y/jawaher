@@ -28,6 +28,8 @@ class Item {
   final List<double> weights; // وزن كل قطعة وقت الإدخال
   final double remaining; // المتبقي بالجرام
   final List<int> soldIdx; // أرقام القطع اللي اتباعت كاملة
+  final int count; // عدد القطع المتبقي
+  final bool hasCount;
   Item({
     required this.id,
     required this.metal,
@@ -38,6 +40,8 @@ class Item {
     required this.weights,
     required this.remaining,
     this.soldIdx = const <int>[],
+    this.count = 0,
+    this.hasCount = true,
   });
 
   factory Item.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -52,6 +56,10 @@ class Item {
       weights: List<double>.from((m['weights'] as List).map((e) => (e as num).toDouble())),
       remaining: (m['remaining'] as num).toDouble(),
       soldIdx: List<int>.from(((m['soldIdx'] ?? []) as List).map((e) => (e as num).toInt())),
+      hasCount: m['count'] != null,
+      count: m['count'] != null
+          ? (m['count'] as num).toInt()
+          : ((m['weights'] as List).length - ((m['soldIdx'] ?? []) as List).length).clamp(0, 100000),
     );
   }
 
@@ -99,6 +107,7 @@ class Store {
       'photo': photo,
       'weights': weights,
       'remaining': weights.fold<double>(0, (a, b) => a + b),
+      'count': weights.length,
       'createdAt': FieldValue.serverTimestamp(),
     });
   }
@@ -248,7 +257,7 @@ class InventoryScreen extends StatelessWidget {
                             borderRadius: BorderRadius.circular(6),
                             child: Image.memory(i.photoBytes!, width: 50, height: 50, fit: BoxFit.cover)),
                     title: Text('عيار ${i.karat}${i.name.isEmpty ? '' : ' - ${i.name}'}'),
-                    subtitle: Text('${i.available.length} قطعة | المتبقي ${i.remaining.toStringAsFixed(2)} جم'),
+                    subtitle: Text('${i.count} قطعة | المتبقي ${i.remaining.toStringAsFixed(2)} جم'),
                     trailing: Text(i.barcode, textDirection: TextDirection.ltr),
                     onTap: () => Navigator.push(
                         context, MaterialPageRoute(builder: (_) => ItemDetailScreen(item: i))),
@@ -307,6 +316,7 @@ class _AddItemScreenState extends State<AddItemScreen> {
   final _count = TextEditingController(text: '1');
   List<TextEditingController> _weights = [TextEditingController()];
   String _photo = '';
+  bool _saved = false;
   late String _barcode = Store.newBarcode(widget.metal, karat);
 
   Future<void> _pickPhoto() async {
@@ -331,6 +341,7 @@ class _AddItemScreenState extends State<AddItemScreen> {
   }
 
   void _save() {
+    if (_saved) return;
     final ws = <double>[];
     for (final c in _weights) {
       final w = double.tryParse(c.text.trim().replaceAll(',', '.'));
@@ -349,8 +360,18 @@ class _AddItemScreenState extends State<AddItemScreen> {
       photo: _photo,
       weights: ws,
     );
-    Navigator.pop(context);
+    setState(() => _saved = true);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حفظ المنتج')));
   }
+
+  void _newOp() => setState(() {
+        _name.clear();
+        _count.text = '1';
+        _weights = [TextEditingController()];
+        _photo = '';
+        _barcode = Store.newBarcode(widget.metal, karat);
+        _saved = false;
+      });
 
   @override
   Widget build(BuildContext context) {
@@ -412,7 +433,19 @@ class _AddItemScreenState extends State<AddItemScreen> {
           child: BarcodeWidget(barcode: Barcode.code128(), data: _barcode, height: 70),
         ),
         const SizedBox(height: 16),
-        FilledButton(onPressed: _save, child: const Padding(padding: EdgeInsets.all(12), child: Text('حفظ'))),
+        FilledButton(
+          onPressed: _saved ? null : _save,
+          child: Padding(padding: const EdgeInsets.all(12), child: Text(_saved ? 'تم الحفظ ✓' : 'حفظ')),
+        ),
+        if (_saved)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: OutlinedButton.icon(
+              onPressed: _newOp,
+              icon: const Icon(Icons.refresh),
+              label: const Text('منتج جديد'),
+            ),
+          ),
       ]),
     );
   }
@@ -485,6 +518,52 @@ Widget tf(String label, TextEditingController c,
 }
 
 /// عمليات البيع والشراء. بنستخدم batch من غير await عشان تشتغل من غير نت.
+Object _cnt(Item it, int delta) => it.hasCount ? FieldValue.increment(delta) : it.count + delta;
+
+class SaleLine {
+  final Item item;
+  final double weight;
+  final int count;
+  final List<int> pieces;
+  final double pricePerGram;
+  final double fee;
+  const SaleLine({
+    required this.item,
+    required this.weight,
+    required this.count,
+    required this.pieces,
+    required this.pricePerGram,
+    required this.fee,
+  });
+  double get total => weight * pricePerGram + fee;
+}
+
+class BuyLine {
+  final Item? existing;
+  final int karat;
+  final String barcode, photo, desc;
+  final double weight;
+  final int count;
+  final double price;
+  const BuyLine({
+    required this.existing,
+    required this.karat,
+    required this.barcode,
+    required this.photo,
+    required this.desc,
+    required this.weight,
+    required this.count,
+    required this.price,
+  });
+}
+
+Item? _find(List<Item> items, String id) {
+  for (final i in items) {
+    if (i.id == id) return i;
+  }
+  return null;
+}
+
 class Ops {
   static CollectionReference<Map<String, dynamic>> col(String name) =>
       FirebaseFirestore.instance.collection('users').doc(Store.user).collection(name);
@@ -496,30 +575,45 @@ class Ops {
         return l;
       });
 
-  static void sell({
-    required Item item,
-    required double weight,
-    required double pricePerGram,
-    required double fee,
-    required double total,
+  /// عملية بيع واحدة فيها أكتر من منتج
+  static void sellMulti({
+    required String metal,
+    required List<SaleLine> lines,
     required double paid,
     required String customerName,
     required String customerPhone,
-    List<int> pieces = const <int>[],
   }) {
     final batch = FirebaseFirestore.instance.batch();
-    batch.update(Store.items.doc(item.id), {
-      'remaining': FieldValue.increment(-weight),
-      if (pieces.isNotEmpty) 'soldIdx': FieldValue.arrayUnion(pieces),
-    });
+    var total = 0.0, fee = 0.0, weight = 0.0;
+    var count = 0;
+    final maps = <Map<String, dynamic>>[];
+    for (final l in lines) {
+      batch.update(Store.items.doc(l.item.id), {
+        'remaining': FieldValue.increment(-l.weight),
+        'count': _cnt(l.item, -l.count),
+        if (l.pieces.isNotEmpty) 'soldIdx': FieldValue.arrayUnion(l.pieces),
+      });
+      total += l.total;
+      fee += l.fee;
+      weight += l.weight;
+      count += l.count;
+      maps.add({
+        'itemId': l.item.id,
+        'barcode': l.item.barcode,
+        'karat': l.item.karat,
+        'weight': l.weight,
+        'count': l.count,
+        'pieces': l.pieces,
+        'pricePerGram': l.pricePerGram,
+        'fee': l.fee,
+        'total': l.total,
+      });
+    }
     batch.set(col('sales').doc(), {
-      'metal': item.metal,
-      'karat': item.karat,
-      'barcode': item.barcode,
-      'itemId': item.id,
-      'pieces': pieces,
+      'metal': metal,
+      'lines': maps,
       'weight': weight,
-      'pricePerGram': pricePerGram,
+      'count': count,
       'fee': fee,
       'total': total,
       'paid': paid,
@@ -530,50 +624,65 @@ class Ops {
     batch.commit();
   }
 
-  static void buy({
-    Item? existing,
+  /// عملية شراء (أو قطع) واحدة فيها أكتر من منتج
+  static void buyMulti({
     required String metal,
-    required int karat,
-    required String barcode,
-    required String photo,
-    required String desc,
-    required double weight,
-    required double price,
+    required List<BuyLine> lines,
     required double paid,
     required String customerName,
     required String customerPhone,
     bool cut = false,
   }) {
     final batch = FirebaseFirestore.instance.batch();
-    final ref = existing != null ? Store.items.doc(existing.id) : Store.items.doc();
-    if (existing != null) {
-      batch.update(ref, {
-        'remaining': FieldValue.increment(weight),
-        'weights': [...existing.weights, weight],
-      });
-    } else {
-      batch.set(ref, {
-        'metal': metal,
-        'karat': karat,
-        'name': desc,
-        'barcode': barcode,
-        'photo': photo,
-        'weights': [weight],
-        'remaining': weight,
-        'createdAt': Timestamp.now(),
+    var price = 0.0, weight = 0.0;
+    var count = 0;
+    final maps = <Map<String, dynamic>>[];
+    for (final l in lines) {
+      final ex = l.existing;
+      final ref = ex != null ? Store.items.doc(ex.id) : Store.items.doc();
+      final newWeights = List<double>.filled(l.count, l.weight / l.count);
+      final start = ex != null ? ex.weights.length : 0;
+      if (ex != null) {
+        batch.update(ref, {
+          'remaining': FieldValue.increment(l.weight),
+          'count': _cnt(ex, l.count),
+          'weights': [...ex.weights, ...newWeights],
+        });
+      } else {
+        batch.set(ref, {
+          'metal': metal,
+          'karat': l.karat,
+          'name': l.desc,
+          'barcode': l.barcode,
+          'photo': l.photo,
+          'weights': newWeights,
+          'remaining': l.weight,
+          'count': l.count,
+          'createdAt': Timestamp.now(),
+        });
+      }
+      price += l.price;
+      weight += l.weight;
+      count += l.count;
+      maps.add({
+        'itemId': ref.id,
+        'barcode': l.barcode,
+        'karat': l.karat,
+        'weight': l.weight,
+        'count': l.count,
+        'price': l.price,
+        'newItem': ex == null,
+        'pieceIdx': [for (var i = 0; i < l.count; i++) start + i],
       });
     }
     batch.set(col('purchases').doc(), {
       'metal': metal,
-      'karat': karat,
-      'barcode': barcode,
-      'itemId': ref.id,
-      'cut': cut,
-      'newItem': existing == null,
-      'pieceIdx': existing != null ? existing.weights.length : 0,
+      'lines': maps,
       'weight': weight,
+      'count': count,
       'price': price,
       'paid': paid,
+      'cut': cut,
       'customerName': customerName,
       'customerPhone': customerPhone,
       'ts': Timestamp.now(),
@@ -615,13 +724,19 @@ class Ops {
     });
   }
 
-  static void deleteSale(Map<String, dynamic> m, List<String> paymentIds) {
+  static void deleteSale(Map<String, dynamic> m, List<String> paymentIds, List<Item> items) {
     final b = FirebaseFirestore.instance.batch();
-    final pieces = ((m['pieces'] ?? []) as List).map((e) => (e as num).toInt()).toList();
-    b.update(Store.items.doc(m['itemId'] as String), {
-      'remaining': FieldValue.increment(nd(m['weight'])),
-      if (pieces.isNotEmpty) 'soldIdx': FieldValue.arrayRemove(pieces),
-    });
+    for (final l in linesOf(m, true)) {
+      final pieces = ((l['pieces'] ?? []) as List).map((e) => (e as num).toInt()).toList();
+      final n = (l['count'] as num?)?.toInt() ?? pieces.length;
+      final id = l['itemId'] as String;
+      final it = _find(items, id);
+      b.update(Store.items.doc(id), {
+        'remaining': FieldValue.increment(nd(l['weight'])),
+        'count': it != null ? _cnt(it, n) : FieldValue.increment(n),
+        if (pieces.isNotEmpty) 'soldIdx': FieldValue.arrayRemove(pieces),
+      });
+    }
     b.delete(col('sales').doc(m['id'] as String));
     for (final id in paymentIds) {
       b.delete(col('payments').doc(id));
@@ -629,13 +744,22 @@ class Ops {
     b.commit();
   }
 
-  static void deletePurchase(Map<String, dynamic> m, List<String> paymentIds) {
+  static void deletePurchase(Map<String, dynamic> m, List<String> paymentIds, List<Item> items) {
     final b = FirebaseFirestore.instance.batch();
-    final idx = m['pieceIdx'];
-    b.update(Store.items.doc(m['itemId'] as String), {
-      'remaining': FieldValue.increment(-nd(m['weight'])),
-      if (idx != null) 'soldIdx': FieldValue.arrayUnion([(idx as num).toInt()]),
-    });
+    for (final l in linesOf(m, false)) {
+      final raw = l['pieceIdx'];
+      final List<int> idxs = raw is List
+          ? raw.map((e) => (e as num).toInt()).toList()
+          : (raw is num ? <int>[raw.toInt()] : <int>[]);
+      final n = (l['count'] as num?)?.toInt() ?? 1;
+      final id = l['itemId'] as String;
+      final it = _find(items, id);
+      b.update(Store.items.doc(id), {
+        'remaining': FieldValue.increment(-nd(l['weight'])),
+        'count': it != null ? _cnt(it, -n) : FieldValue.increment(-n),
+        if (idxs.isNotEmpty) 'soldIdx': FieldValue.arrayUnion(idxs),
+      });
+    }
     b.delete(col('purchases').doc(m['id'] as String));
     for (final id in paymentIds) {
       b.delete(col('payments').doc(id));
@@ -647,18 +771,24 @@ class Ops {
     required String metal,
     required Item from,
     required double weight,
+    required int count,
     required int toKarat,
     Item? to,
     required double toWeight,
   }) {
     final b = FirebaseFirestore.instance.batch();
-    b.update(Store.items.doc(from.id), {'remaining': FieldValue.increment(-weight)});
+    b.update(Store.items.doc(from.id), {
+      'remaining': FieldValue.increment(-weight),
+      'count': _cnt(from, -count),
+    });
+    final newWeights = List<double>.filled(count, toWeight / count);
     final String toBarcode;
     if (to != null) {
       toBarcode = to.barcode;
       b.update(Store.items.doc(to.id), {
         'remaining': FieldValue.increment(toWeight),
-        'weights': [...to.weights, toWeight],
+        'count': _cnt(to, count),
+        'weights': [...to.weights, ...newWeights],
       });
     } else {
       toBarcode = Store.newBarcode(metal, toKarat);
@@ -668,8 +798,9 @@ class Ops {
         'name': 'محوّل من عيار ${from.karat}',
         'barcode': toBarcode,
         'photo': '',
-        'weights': [toWeight],
+        'weights': newWeights,
         'remaining': toWeight,
+        'count': count,
         'createdAt': Timestamp.now(),
       });
     }
@@ -679,6 +810,7 @@ class Ops {
       'toKarat': toKarat,
       'fromWeight': weight,
       'toWeight': toWeight,
+      'count': count,
       'fromBarcode': from.barcode,
       'toBarcode': toBarcode,
       'ts': Timestamp.now(),
@@ -752,9 +884,16 @@ class ItemPicker extends StatelessWidget {
           child: Autocomplete<Item>(
             displayStringForOption: (i) => i.barcode,
             optionsBuilder: (v) {
-              final q = v.text.trim().toUpperCase();
-              return items.where((i) =>
-                  q.isEmpty || i.barcode.toUpperCase().contains(q) || '${i.karat}' == q);
+              final tokens = v.text
+                  .trim()
+                  .toUpperCase()
+                  .split(RegExp(r'\s+'))
+                  .where((t) => t.isNotEmpty)
+                  .toList();
+              return items.where((i) {
+                final hay = '${i.barcode} ${i.name} ${i.karat}'.toUpperCase();
+                return tokens.every((t) => hay.contains(t));
+              });
             },
             onSelected: onSelected,
             fieldViewBuilder: (ctx, ctrl, focus, submit) => TextField(
@@ -771,7 +910,7 @@ class ItemPicker extends StatelessWidget {
                 }
               },
               decoration: InputDecoration(
-                labelText: 'الباركود (اكتبه أو امسحه أو اختار)',
+                labelText: 'الباركود أو الاسم (اكتب أو امسح أو اختار)',
                 border: const OutlineInputBorder(),
                 prefixIcon: const Icon(Icons.qr_code),
                 suffixIcon: (Platform.isAndroid || Platform.isIOS)
@@ -810,7 +949,7 @@ class ItemPicker extends StatelessWidget {
                           leading: _thumb(i),
                           title: Text(i.barcode, textDirection: TextDirection.ltr),
                           subtitle: Text(
-                              'عيار ${i.karat}${i.name.isEmpty ? '' : ' - ${i.name}'} | المتبقي ${money(i.remaining)} جم'),
+                              'عيار ${i.karat}${i.name.isEmpty ? '' : ' - ${i.name}'} | المتبقي ${money(i.remaining)} جم | العدد ${i.count}'),
                           onTap: () => onSel(i),
                         ),
                     ],
@@ -865,7 +1004,7 @@ class ItemInfo extends StatelessWidget {
             ? const Icon(Icons.diamond)
             : Image.memory(item.photoBytes!, width: 50, height: 50, fit: BoxFit.cover),
         title: Text('عيار ${item.karat}${item.name.isEmpty ? '' : ' - ${item.name}'}'),
-        subtitle: Text('المتبقي: ${money(item.remaining)} جم'),
+        subtitle: Text('المتبقي: ${money(item.remaining)} جم | العدد: ${item.count}'),
       ),
     );
   }
@@ -879,8 +1018,10 @@ class SellScreen extends StatefulWidget {
 }
 
 class _SellScreenState extends State<SellScreen> {
+  final cart = <SaleLine>[];
   Item? item;
   final w = TextEditingController();
+  final cnt = TextEditingController(text: '1');
   final price = TextEditingController();
   final fee = TextEditingController();
   final paid = TextEditingController();
@@ -889,45 +1030,85 @@ class _SellScreenState extends State<SellScreen> {
   bool feePerGram = true;
   bool byPiece = false;
   final Set<int> picked = {};
+  int gen = 0;
+  bool saved = false;
 
   double get weight => byPiece
-      ? picked.fold<double>(0, (a, n) => a + (item?.weights[n] ?? 0.0))
+      ? picked.fold<double>(0.0, (a, n) => a + (item?.weights[n] ?? 0.0))
       : (parseNum(w) ?? 0.0);
+  int get count => byPiece ? picked.length : (int.tryParse(cnt.text.trim()) ?? 0);
   double get feeTotal => (parseNum(fee) ?? 0.0) * (feePerGram ? weight : 1.0);
-  double get total => weight * (parseNum(price) ?? 0.0) + feeTotal;
+  double get lineTotal => weight * (parseNum(price) ?? 0.0) + feeTotal;
+  double get cartTotal => cart.fold<double>(0.0, (a, l) => a + l.total);
+  double get cartFee => cart.fold<double>(0.0, (a, l) => a + l.fee);
 
-  void _err(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+  void _msg(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
 
-  void save() {
+  void addLine() {
+    if (saved) return _msg('العملية اتحفظت، اضغط "عملية جديدة" لو عايز تسجل واحدة تانية');
     final it = item;
-    if (it == null) return _err('اختار المنتج بالباركود');
-    if (byPiece && picked.isEmpty) return _err('اختار القطع اللي اتباعت');
-    if (weight <= 0 || weight > it.remaining + 0.0001) {
-      return _err('الوزن لازم يكون أكبر من صفر ولا يزيد عن المتبقي (${money(it.remaining)} جم)');
+    if (it == null) return _msg('اختار المنتج بالباركود');
+    if (cart.any((l) => l.item.id == it.id)) return _msg('المنتج ده مضاف بالفعل في العملية');
+    if (byPiece && picked.isEmpty) return _msg('اختار القطع اللي اتباعت');
+    final wt = weight;
+    final cn = count;
+    if (wt <= 0 || cn <= 0) return _msg('اكتب الوزن والعدد');
+    if (wt > it.remaining + 0.0001 || cn > it.count) {
+      return _msg('لا يوجد رصيد كافي (المتاح: ${money(it.remaining)} جم و ${it.count} قطعة)');
     }
     final p = parseNum(price);
-    if (p == null || p <= 0) return _err('اكتب سعر الجرام');
-    final t = total;
-    final pd = paid.text.trim().isEmpty ? t : (parseNum(paid) ?? -1);
-    if (pd < 0 || pd > t + 0.005) return _err('المبلغ المدفوع غير صحيح');
-    if (pd < t - 0.005 && name.text.trim().isEmpty && phone.text.trim().isEmpty) {
-      return _err('في حالة الدفع الجزئي لازم اسم أو رقم العميل');
-    }
-    Ops.sell(
+    if (p == null || p <= 0) return _msg('اكتب سعر الجرام');
+    cart.add(SaleLine(
       item: it,
-      weight: weight,
+      weight: wt,
+      count: cn,
+      pieces: byPiece ? (picked.toList()..sort()) : <int>[],
       pricePerGram: p,
       fee: feeTotal,
-      total: t,
+    ));
+    setState(() {
+      item = null;
+      picked.clear();
+      w.clear();
+      cnt.text = '1';
+      gen++;
+    });
+  }
+
+  void confirm() {
+    if (saved) return _msg('العملية اتحفظت، اضغط "عملية جديدة" لو عايز تسجل واحدة تانية');
+    if (item != null) return _msg('اضغط "إضافة للعملية" الأول عشان المنتج المختار يتحسب');
+    if (cart.isEmpty) return _msg('ضيف منتج واحد على الأقل');
+    final t = cartTotal;
+    final pd = paid.text.trim().isEmpty ? t : (parseNum(paid) ?? -1.0);
+    if (pd < 0 || pd > t + 0.005) return _msg('المبلغ المدفوع غير صحيح');
+    if (pd < t - 0.005 && name.text.trim().isEmpty && phone.text.trim().isEmpty) {
+      return _msg('في حالة الدفع الجزئي لازم اسم أو رقم العميل');
+    }
+    final n = cart.length;
+    Ops.sellMulti(
+      metal: widget.metal,
+      lines: List<SaleLine>.of(cart),
       paid: pd,
       customerName: name.text.trim(),
       customerPhone: phone.text.trim(),
-      pieces: byPiece ? (picked.toList()..sort()) : <int>[],
     );
-    final m = ScaffoldMessenger.of(context);
-    Navigator.pop(context);
-    m.showSnackBar(SnackBar(content: Text('تم البيع. الإجمالي ${money(t)}')));
+    setState(() => saved = true);
+    _msg('تم البيع ($n منتج). الإجمالي ${money(t)}');
   }
+
+  void newOp() => setState(() {
+        cart.clear();
+        item = null;
+        picked.clear();
+        w.clear();
+        cnt.text = '1';
+        paid.clear();
+        name.clear();
+        phone.clear();
+        gen++;
+        saved = false;
+      });
 
   @override
   Widget build(BuildContext context) {
@@ -937,7 +1118,10 @@ class _SellScreenState extends State<SellScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          const Text('إضافة منتج للعملية', style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
           ItemPicker(
+            key: ValueKey(gen),
             metal: widget.metal,
             onSelected: (i) => setState(() {
               item = i;
@@ -954,9 +1138,10 @@ class _SellScreenState extends State<SellScreen> {
             onSelectionChanged: (s) => setState(() => byPiece = s.first),
           ),
           const SizedBox(height: 12),
-          if (!byPiece)
-            tf('الوزن المباع (جرام)', w, onChanged: () => setState(() {}))
-          else if (it == null)
+          if (!byPiece) ...[
+            tf('الوزن المباع (جرام)', w, onChanged: () => setState(() {})),
+            tf('العدد المباع (قطعة)', cnt, type: TextInputType.number, onChanged: () => setState(() {})),
+          ] else if (it == null)
             const Padding(
               padding: EdgeInsets.only(bottom: 12),
               child: Text('اختار المنتج الأول عشان تظهر قطعه'),
@@ -1001,6 +1186,35 @@ class _SellScreenState extends State<SellScreen> {
           ),
           const SizedBox(height: 12),
           tf(feePerGram ? 'المصنعية لكل جرام' : 'المصنعية الإجمالية', fee, onChanged: () => setState(() {})),
+          Text('سعر المنتج ده: ${money(lineTotal)} (مصنعية ${money(feeTotal)})'),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: addLine,
+            icon: const Icon(Icons.add),
+            label: const Text('إضافة للعملية'),
+          ),
+          const Divider(height: 32),
+          Text('المنتجات في العملية (${cart.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          if (cart.isEmpty) const Text('لسه مفيش منتجات'),
+          for (final l in cart)
+            Card(
+              child: ListTile(
+                title: Text('عيار ${l.item.karat} - ${l.item.barcode}', textDirection: TextDirection.ltr),
+                subtitle: Text(
+                    '${money(l.weight)} جم | ${l.count} قطعة | سعر الجرام ${money(l.pricePerGram)} | مصنعية ${money(l.fee)}'),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(money(l.total), style: const TextStyle(fontWeight: FontWeight.bold)),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: saved ? null : () => setState(() => cart.remove(l)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           Card(
             color: Theme.of(context).colorScheme.primaryContainer,
             child: Padding(
@@ -1008,11 +1222,9 @@ class _SellScreenState extends State<SellScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('الوزن: ${money(weight)} جم'),
+                  Text('مجمل المصنعية: ${money(cartFee)}'),
                   const SizedBox(height: 4),
-                  Text('مجمل المصنعية: ${money(feeTotal)}'),
-                  const SizedBox(height: 4),
-                  Text('مجمل السعر: ${money(total)}',
+                  Text('مجمل السعر: ${money(cartTotal)}',
                       style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                 ],
               ),
@@ -1023,9 +1235,21 @@ class _SellScreenState extends State<SellScreen> {
           tf('اسم العميل (اختياري)', name, type: TextInputType.text),
           tf('رقم العميل (اختياري)', phone, type: TextInputType.phone),
           FilledButton(
-            onPressed: save,
-            child: const Padding(padding: EdgeInsets.all(12), child: Text('تأكيد البيع')),
+            onPressed: saved ? null : confirm,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(saved ? 'تم الحفظ ✓' : 'تأكيد البيع'),
+            ),
           ),
+          if (saved)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: OutlinedButton.icon(
+                onPressed: newOp,
+                icon: const Icon(Icons.refresh),
+                label: const Text('عملية جديدة'),
+              ),
+            ),
         ],
       ),
     );
@@ -1040,57 +1264,109 @@ class BuyScreen extends StatefulWidget {
 }
 
 class _BuyScreenState extends State<BuyScreen> {
+  final cart = <BuyLine>[];
   bool isNew = false;
   bool cut = false;
   Item? old;
   late int karat = karatsOf(widget.metal).first;
   late String barcode = Store.newBarcode(widget.metal, karat);
   String photo = '';
+  int gen = 0;
+  bool saved = false;
   final desc = TextEditingController();
   final w = TextEditingController();
+  final cnt = TextEditingController(text: '1');
   final price = TextEditingController();
   final paid = TextEditingController();
   final name = TextEditingController();
   final phone = TextEditingController();
 
-  void _err(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+  void _msg(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+
+  double get cartTotal => cart.fold<double>(0.0, (a, l) => a + l.price);
 
   double get debt {
-    final pr = parseNum(price) ?? 0.0;
+    final pr = cartTotal;
     final pd = paid.text.trim().isEmpty ? pr : (parseNum(paid) ?? 0.0);
     return pr - pd;
   }
 
-  void save() {
-    if (!isNew && old == null) return _err('اختار المنتج القديم بالباركود');
-    final wt = parseNum(w);
-    if (wt == null || wt <= 0) return _err('اكتب الوزن');
-    final pr = parseNum(price);
-    if (pr == null || pr <= 0) return _err('اكتب سعر الشراء');
-    final pd = paid.text.trim().isEmpty ? pr : (parseNum(paid) ?? -1);
-    if (pd < 0 || pd > pr + 0.005) return _err('المبلغ المدفوع غير صحيح');
-    if (!cut && pd < pr - 0.005 && name.text.trim().isEmpty && phone.text.trim().isEmpty) {
-      return _err('في حالة الدفع الجزئي لازم اسم أو رقم العميل');
+  void addLine() {
+    if (saved) return _msg('العملية اتحفظت، اضغط "عملية جديدة" لو عايز تسجل واحدة تانية');
+    final o = old;
+    if (!isNew && o == null) return _msg('اختار المنتج القديم بالباركود');
+    if (!isNew && o != null && cart.any((l) => l.existing?.id == o.id)) {
+      return _msg('المنتج ده مضاف بالفعل في العملية');
     }
-    Ops.buy(
-      cut: cut,
-      existing: isNew ? null : old,
-      metal: widget.metal,
-      karat: isNew ? karat : old!.karat,
-      barcode: isNew ? barcode : old!.barcode,
-      photo: photo,
+    final wt = parseNum(w);
+    if (wt == null || wt <= 0) return _msg('اكتب الوزن');
+    final cn = int.tryParse(cnt.text.trim()) ?? 0;
+    if (cn <= 0) return _msg('اكتب العدد');
+    final pr = parseNum(price);
+    if (pr == null || pr <= 0) return _msg('اكتب سعر الشراء للمنتج ده');
+    cart.add(BuyLine(
+      existing: isNew ? null : o,
+      karat: isNew ? karat : o!.karat,
+      barcode: isNew ? barcode : o!.barcode,
+      photo: isNew ? photo : '',
       desc: desc.text.trim(),
       weight: wt,
+      count: cn,
       price: pr,
+    ));
+    setState(() {
+      old = null;
+      photo = '';
+      desc.clear();
+      w.clear();
+      cnt.text = '1';
+      price.clear();
+      barcode = Store.newBarcode(widget.metal, karat);
+      gen++;
+    });
+  }
+
+  void confirm() {
+    if (saved) return _msg('العملية اتحفظت، اضغط "عملية جديدة" لو عايز تسجل واحدة تانية');
+    if (old != null || w.text.trim().isNotEmpty) {
+      return _msg('اضغط "إضافة للعملية" الأول عشان المنتج المكتوب يتحسب');
+    }
+    if (cart.isEmpty) return _msg('ضيف منتج واحد على الأقل');
+    final pr = cartTotal;
+    final pd = paid.text.trim().isEmpty ? pr : (parseNum(paid) ?? -1.0);
+    if (pd < 0 || pd > pr + 0.005) return _msg('المبلغ المدفوع غير صحيح');
+    if (!cut && pd < pr - 0.005 && name.text.trim().isEmpty && phone.text.trim().isEmpty) {
+      return _msg('في حالة الدفع الجزئي لازم اسم أو رقم العميل');
+    }
+    final n = cart.length;
+    Ops.buyMulti(
+      metal: widget.metal,
+      lines: List<BuyLine>.of(cart),
       paid: pd,
       customerName: cut ? '' : name.text.trim(),
       customerPhone: cut ? '' : phone.text.trim(),
+      cut: cut,
     );
-    final m = ScaffoldMessenger.of(context);
-    Navigator.pop(context);
-    m.showSnackBar(SnackBar(
-        content: Text(pr - pd > 0.005 ? 'تم التسجيل. عليا مديونية ${money(pr - pd)}' : 'تم تسجيل الشراء. لا توجد مديونية')));
+    final owe = pr - pd;
+    setState(() => saved = true);
+    _msg(owe > 0.005 ? 'تم التسجيل ($n منتج). عليا مديونية ${money(owe)}' : 'تم التسجيل ($n منتج)');
   }
+
+  void newOp() => setState(() {
+        cart.clear();
+        old = null;
+        photo = '';
+        desc.clear();
+        w.clear();
+        cnt.text = '1';
+        price.clear();
+        paid.clear();
+        name.clear();
+        phone.clear();
+        barcode = Store.newBarcode(widget.metal, karat);
+        gen++;
+        saved = false;
+      });
 
   @override
   Widget build(BuildContext context) {
@@ -1099,6 +1375,8 @@ class _BuyScreenState extends State<BuyScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          const Text('إضافة منتج للعملية', style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
           SegmentedButton<bool>(
             segments: const [
               ButtonSegment(value: false, label: Text('منتج قديم')),
@@ -1109,7 +1387,11 @@ class _BuyScreenState extends State<BuyScreen> {
           ),
           const SizedBox(height: 16),
           if (!isNew) ...[
-            ItemPicker(metal: widget.metal, onSelected: (i) => setState(() => old = i)),
+            ItemPicker(
+              key: ValueKey(gen),
+              metal: widget.metal,
+              onSelected: (i) => setState(() => old = i),
+            ),
             if (old != null) ItemInfo(old!),
           ] else ...[
             Center(
@@ -1146,21 +1428,56 @@ class _BuyScreenState extends State<BuyScreen> {
             ),
             const SizedBox(height: 12),
             tf('وصف (اختياري)', desc, type: TextInputType.text),
-            Container(
-              color: Colors.white,
-              padding: const EdgeInsets.all(8),
-              margin: const EdgeInsets.only(bottom: 12),
-              child: BarcodeWidget(barcode: Barcode.code128(), data: barcode, height: 70),
-            ),
           ],
+          tf('الوزن (جرام)', w),
+          tf('العدد (قطعة)', cnt, type: TextInputType.number),
+          tf('سعر شراء المنتج ده', price),
+          OutlinedButton.icon(
+            onPressed: addLine,
+            icon: const Icon(Icons.add),
+            label: const Text('إضافة للعملية'),
+          ),
+          const Divider(height: 32),
+          Text('المنتجات في العملية (${cart.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          if (cart.isEmpty) const Text('لسه مفيش منتجات'),
+          for (final l in cart)
+            Card(
+              child: Column(
+                children: [
+                  ListTile(
+                    title: Text('عيار ${l.karat} - ${l.existing == null ? 'منتج جديد' : 'منتج قديم'}'),
+                    subtitle: Text('${money(l.weight)} جم | ${l.count} قطعة | ${l.barcode}'),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(money(l.price), style: const TextStyle(fontWeight: FontWeight.bold)),
+                        IconButton(
+                          icon: const Icon(Icons.close),
+                          onPressed: saved ? null : () => setState(() => cart.remove(l)),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (l.existing == null)
+                    Container(
+                      color: Colors.white,
+                      padding: const EdgeInsets.all(8),
+                      margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                      child: BarcodeWidget(barcode: Barcode.code128(), data: l.barcode, height: 50),
+                    ),
+                ],
+              ),
+            ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('قطع (من غير اسم ورقم عميل)'),
             value: cut,
             onChanged: (v) => setState(() => cut = v),
           ),
-          tf('الوزن (جرام)', w),
-          tf('سعر الشراء الإجمالي', price, onChanged: () => setState(() {})),
+          Text('إجمالي سعر الشراء: ${money(cartTotal)}',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
           tf('المبلغ المدفوع (سيبه فاضي لو دفعت كامل)', paid, onChanged: () => setState(() {})),
           Card(
             color: debt > 0.005 ? Colors.red.shade100 : Colors.green.shade100,
@@ -1178,9 +1495,21 @@ class _BuyScreenState extends State<BuyScreen> {
             tf('رقم العميل (اختياري)', phone, type: TextInputType.phone),
           ],
           FilledButton(
-            onPressed: save,
-            child: const Padding(padding: EdgeInsets.all(12), child: Text('تأكيد الشراء')),
+            onPressed: saved ? null : confirm,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(saved ? 'تم الحفظ ✓' : 'تأكيد الشراء'),
+            ),
           ),
+          if (saved)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: OutlinedButton.icon(
+                onPressed: newOp,
+                icon: const Icon(Icons.refresh),
+                label: const Text('عملية جديدة'),
+              ),
+            ),
         ],
       ),
     );
@@ -1346,54 +1675,50 @@ Future<Map<String, String>?> editDialog(BuildContext context, String title, Map<
   );
 }
 
+List<Map<String, dynamic>> linesOf(Map<String, dynamic> m, bool isSale) {
+  final raw = m['lines'];
+  if (raw is List) {
+    return [for (final e in raw) Map<String, dynamic>.from(e as Map)];
+  }
+  return [
+    <String, dynamic>{
+      'itemId': m['itemId'],
+      'barcode': m['barcode'],
+      'karat': m['karat'],
+      'weight': m['weight'],
+      'count': m['count'],
+      'pieces': m['pieces'] ?? [],
+      'pieceIdx': m['pieceIdx'],
+      'pricePerGram': m['pricePerGram'],
+      'fee': m['fee'],
+      'total': isSale ? m['total'] : m['price'],
+    }
+  ];
+}
+
 Future<void> editOp(BuildContext context, Map<String, dynamic> m, bool isSale, MultiData d) async {
   final msg = ScaffoldMessenger.of(context);
   void err(String s) => msg.showSnackBar(SnackBar(content: Text(s)));
   final id = m['id'] as String;
-  if (isSale) {
-    final r = await editDialog(context, 'تعديل عملية البيع', {
-      'سعر الجرام': money(nd(m['pricePerGram'])),
-      'المصنعية الإجمالية': money(nd(m['fee'])),
-      'المبلغ المدفوع وقت البيع': money(nd(m['paid'])),
-      'اسم العميل': '${m['customerName'] ?? ''}',
-      'رقم العميل': '${m['customerPhone'] ?? ''}',
-    });
-    if (r == null) return;
-    final ppg = pn(r['سعر الجرام']);
-    final fee = pn(r['المصنعية الإجمالية']);
-    final paid = pn(r['المبلغ المدفوع وقت البيع']);
-    if (ppg == null || ppg <= 0 || fee == null || fee < 0 || paid == null || paid < 0) {
-      return err('قيم غير صحيحة');
-    }
-    final total = nd(m['weight']) * ppg + fee;
-    if (paid + (d.paySum[id] ?? 0.0) > total + 0.005) return err('المدفوع أكبر من الإجمالي الجديد');
-    Ops.col('sales').doc(id).update({
-      'pricePerGram': ppg,
-      'fee': fee,
-      'total': total,
-      'paid': paid,
-      'customerName': r['اسم العميل'],
-      'customerPhone': r['رقم العميل'],
-    });
-  } else {
-    final r = await editDialog(context, 'تعديل عملية الشراء', {
-      'سعر الشراء الإجمالي': money(nd(m['price'])),
-      'المبلغ المدفوع وقت الشراء': money(nd(m['paid'])),
-      'اسم العميل': '${m['customerName'] ?? ''}',
-      'رقم العميل': '${m['customerPhone'] ?? ''}',
-    });
-    if (r == null) return;
-    final price = pn(r['سعر الشراء الإجمالي']);
-    final paid = pn(r['المبلغ المدفوع وقت الشراء']);
-    if (price == null || price <= 0 || paid == null || paid < 0) return err('قيم غير صحيحة');
-    if (paid + (d.paySum[id] ?? 0.0) > price + 0.005) return err('المدفوع أكبر من السعر الجديد');
-    Ops.col('purchases').doc(id).update({
-      'price': price,
-      'paid': paid,
-      'customerName': r['اسم العميل'],
-      'customerPhone': r['رقم العميل'],
-    });
-  }
+  final totalKey = isSale ? 'total' : 'price';
+  final totalLabel = isSale ? 'الإجمالي النهائي' : 'سعر الشراء الإجمالي';
+  final r = await editDialog(context, isSale ? 'تعديل عملية البيع' : 'تعديل عملية الشراء', {
+    totalLabel: money(nd(m[totalKey])),
+    'المبلغ المدفوع': money(nd(m['paid'])),
+    'اسم العميل': '${m['customerName'] ?? ''}',
+    'رقم العميل': '${m['customerPhone'] ?? ''}',
+  });
+  if (r == null) return;
+  final total = pn(r[totalLabel]);
+  final paid = pn(r['المبلغ المدفوع']);
+  if (total == null || total <= 0 || paid == null || paid < 0) return err('قيم غير صحيحة');
+  if (paid + (d.paySum[id] ?? 0.0) > total + 0.005) return err('المدفوع أكبر من الإجمالي');
+  Ops.col(isSale ? 'sales' : 'purchases').doc(id).update({
+    totalKey: total,
+    'paid': paid,
+    'customerName': r['اسم العميل'],
+    'customerPhone': r['رقم العميل'],
+  });
 }
 
 Future<void> deleteOp(BuildContext context, Map<String, dynamic> m, bool isSale, MultiData d) async {
@@ -1403,18 +1728,21 @@ Future<void> deleteOp(BuildContext context, Map<String, dynamic> m, bool isSale,
       .map((p) => p['id'] as String)
       .toList();
   if (!isSale) {
-    final it = d.itemById(m['itemId'] as String);
-    if (it != null && it.remaining < nd(m['weight']) - 0.0001) {
-      msg.showSnackBar(const SnackBar(
-          content: Text('اتباع من المنتج ده بعد الشراء، امسح عملية البيع الأول')));
-      return;
+    for (final l in linesOf(m, false)) {
+      final it = d.itemById(l['itemId'] as String);
+      final n = (l['count'] as num?)?.toInt() ?? 1;
+      if (it != null && (it.remaining < nd(l['weight']) - 0.0001 || it.count < n)) {
+        msg.showSnackBar(const SnackBar(
+            content: Text('لا يوجد رصيد كافي: اتباع من المنتج ده بعد الشراء، امسح عملية البيع الأول')));
+        return;
+      }
     }
   }
   if (!await confirmDialog(context, 'مسح العملية دي؟ المخزون هيتعدّل تلقائيًا.')) return;
   if (isSale) {
-    Ops.deleteSale(m, ids);
+    Ops.deleteSale(m, ids, d.items);
   } else {
-    Ops.deletePurchase(m, ids);
+    Ops.deletePurchase(m, ids, d.items);
   }
   msg.showSnackBar(const SnackBar(content: Text('تم المسح')));
 }
@@ -1476,20 +1804,22 @@ Widget opTile(BuildContext context, Map<String, dynamic> m, bool isSale, MultiDa
   final who = [m['customerName'], m['customerPhone']]
       .where((e) => e != null && '$e'.isNotEmpty)
       .join(' - ');
-  final pieces = (m['pieces'] as List?) ?? const [];
+  final ls = linesOf(m, isSale);
+  final title = ls.length == 1
+      ? 'عيار ${ls.first['karat']} - ${money(nd(m['weight']))} جم'
+      : '${ls.length} منتجات - ${money(nd(m['weight']))} جم';
   final lines = <String>[
     fmtDate(m['ts'] as Timestamp),
-    '${m['barcode']}',
-    if (pieces.isNotEmpty) 'عدد القطع: ${pieces.length}',
+    for (final l in ls)
+      '• عيار ${l['karat']} | ${money(nd(l['weight']))} جم | ${l['count'] ?? '-'} قطعة | ${l['barcode']}',
     if (who.isNotEmpty) 'العميل: $who',
-    if (isSale) 'مصنعية ${money(nd(m['fee']))} | سعر الجرام ${money(nd(m['pricePerGram']))}',
+    if (isSale) 'مصنعية ${money(nd(m['fee']))}',
     'مدفوع ${money(paid)}'
         '${rest > 0.005 ? (isSale ? ' | متبقي عليه ${money(rest)}' : ' | متبقي علينا ${money(rest)}') : ''}',
   ];
   return Card(
     child: ListTile(
-      isThreeLine: true,
-      title: Text('عيار ${m['karat']} - ${money(nd(m['weight']))} جم${m['cut'] == true ? ' (قطع)' : ''}'),
+      title: Text('$title${m['cut'] == true ? ' (قطع)' : ''}'),
       subtitle: Text(lines.join('\n')),
       trailing: Text(money(amount), style: const TextStyle(fontWeight: FontWeight.bold)),
       onTap: () => opActions(context, m, isSale, d),
@@ -1866,10 +2196,12 @@ class ExpensesScreen extends StatefulWidget {
 
 class _ExpensesScreenState extends State<ExpensesScreen> {
   bool salary = false;
+  bool saved = false;
   final title = TextEditingController();
   final amount = TextEditingController();
 
   void save() {
+    if (saved) return;
     final a = parseNum(amount);
     if (title.text.trim().isEmpty || a == null || a <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1882,10 +2214,15 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
       title: title.text.trim(),
       amount: a,
     );
-    final m = ScaffoldMessenger.of(context);
-    Navigator.pop(context);
-    m.showSnackBar(const SnackBar(content: Text('تم الحفظ')));
+    setState(() => saved = true);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم الحفظ')));
   }
+
+  void newOp() => setState(() {
+        title.clear();
+        amount.clear();
+        saved = false;
+      });
 
   @override
   Widget build(BuildContext context) {
@@ -1906,9 +2243,18 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
           tf(salary ? 'اسم العامل' : 'وصف المصروف (مثال: صيانة المحل)', title, type: TextInputType.text),
           tf(salary ? 'مبلغ القبض' : 'المبلغ', amount),
           FilledButton(
-            onPressed: save,
-            child: const Padding(padding: EdgeInsets.all(12), child: Text('حفظ')),
+            onPressed: saved ? null : save,
+            child: Padding(padding: const EdgeInsets.all(12), child: Text(saved ? 'تم الحفظ ✓' : 'حفظ')),
           ),
+          if (saved)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: OutlinedButton.icon(
+                onPressed: newOp,
+                icon: const Icon(Icons.refresh),
+                label: const Text('عملية جديدة'),
+              ),
+            ),
         ],
       ),
     );
@@ -1926,8 +2272,11 @@ class _ConvertScreenState extends State<ConvertScreen> {
   Item? from;
   Item? to;
   bool toExisting = false;
+  bool saved = false;
+  int gen = 0;
   late int toKarat = karatsOf(widget.metal).first;
   final w = TextEditingController();
+  final cnt = TextEditingController(text: '1');
   final toW = TextEditingController();
 
   void _recalc() {
@@ -1937,29 +2286,42 @@ class _ConvertScreenState extends State<ConvertScreen> {
     setState(() {});
   }
 
-  void _err(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+  void _msg(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
 
   void save() {
+    if (saved) return;
     final f = from;
-    if (f == null) return _err('اختار المنتج اللي هيتحول منه');
+    if (f == null) return _msg('اختار المنتج اللي هيتحول منه');
     final wt = parseNum(w);
-    if (wt == null || wt <= 0 || wt > f.remaining + 0.0001) {
-      return _err('الوزن لازم يكون أكبر من صفر ولا يزيد عن المتبقي (${money(f.remaining)} جم)');
+    final cn = int.tryParse(cnt.text.trim()) ?? 0;
+    if (wt == null || wt <= 0 || cn <= 0) return _msg('اكتب الوزن والعدد');
+    if (wt > f.remaining + 0.0001 || cn > f.count) {
+      return _msg('لا يوجد رصيد كافي (المتاح: ${money(f.remaining)} جم و ${f.count} قطعة)');
     }
-    if (toKarat == f.karat) return _err('اختار عيار مختلف');
+    if (toKarat == f.karat) return _msg('اختار عيار مختلف');
     final tw = parseNum(toW);
-    if (tw == null || tw <= 0) return _err('اكتب الوزن الناتج');
+    if (tw == null || tw <= 0) return _msg('اكتب الوزن الناتج');
     Item? dest;
     if (toExisting) {
       dest = to;
-      if (dest == null) return _err('اختار المنتج اللي هيتحول إليه');
-      if (dest.karat != toKarat) return _err('المنتج المختار مش من عيار $toKarat');
+      if (dest == null) return _msg('اختار المنتج اللي هيتحول إليه');
+      if (dest.karat != toKarat) return _msg('المنتج المختار مش من عيار $toKarat');
     }
-    Ops.convert(metal: widget.metal, from: f, weight: wt, toKarat: toKarat, to: dest, toWeight: tw);
-    final m = ScaffoldMessenger.of(context);
-    Navigator.pop(context);
-    m.showSnackBar(SnackBar(content: Text('تم التحويل: ${money(wt)} جم ← ${money(tw)} جم')));
+    Ops.convert(
+        metal: widget.metal, from: f, weight: wt, count: cn, toKarat: toKarat, to: dest, toWeight: tw);
+    setState(() => saved = true);
+    _msg('تم التحويل: ${money(wt)} جم ← ${money(tw)} جم');
   }
+
+  void newOp() => setState(() {
+        from = null;
+        to = null;
+        w.clear();
+        toW.clear();
+        cnt.text = '1';
+        gen++;
+        saved = false;
+      });
 
   @override
   Widget build(BuildContext context) {
@@ -1971,6 +2333,7 @@ class _ConvertScreenState extends State<ConvertScreen> {
           const Text('التحويل من:'),
           const SizedBox(height: 8),
           ItemPicker(
+            key: ValueKey('from$gen'),
             metal: widget.metal,
             onSelected: (i) {
               from = i;
@@ -1979,6 +2342,7 @@ class _ConvertScreenState extends State<ConvertScreen> {
           ),
           if (from != null) ItemInfo(from!),
           tf('الوزن المحوّل (جرام)', w, onChanged: _recalc),
+          tf('العدد المحوّل (قطعة)', cnt, type: TextInputType.number),
           DropdownButtonFormField<int>(
             value: toKarat,
             decoration: const InputDecoration(labelText: 'التحويل إلى عيار', border: OutlineInputBorder()),
@@ -2002,7 +2366,11 @@ class _ConvertScreenState extends State<ConvertScreen> {
           ),
           const SizedBox(height: 12),
           if (toExisting) ...[
-            ItemPicker(metal: widget.metal, onSelected: (i) => setState(() => to = i)),
+            ItemPicker(
+              key: ValueKey('to$gen'),
+              metal: widget.metal,
+              onSelected: (i) => setState(() => to = i),
+            ),
             if (to != null) ItemInfo(to!),
           ],
           tf('الوزن الناتج (جرام) - بيتحسب تلقائي وتقدر تعدله', toW),
@@ -2012,9 +2380,18 @@ class _ConvertScreenState extends State<ConvertScreen> {
           ),
           const SizedBox(height: 12),
           FilledButton(
-            onPressed: save,
-            child: const Padding(padding: EdgeInsets.all(12), child: Text('تأكيد التحويل')),
+            onPressed: saved ? null : save,
+            child: Padding(padding: const EdgeInsets.all(12), child: Text(saved ? 'تم الحفظ ✓' : 'تأكيد التحويل')),
           ),
+          if (saved)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: OutlinedButton.icon(
+                onPressed: newOp,
+                icon: const Icon(Icons.refresh),
+                label: const Text('عملية جديدة'),
+              ),
+            ),
         ],
       ),
     );
