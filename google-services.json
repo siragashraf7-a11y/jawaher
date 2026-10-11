@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "318647096452",
+    "project_id": "jewelry-5b3d6",
+    "storage_bucket": "jewelry-5b3d6.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:318647096452:android:6262bc4c1627b94e13ded1",
+        "android_client_info": {
+          "package_name": "com.goldshop.gold_shop"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBTaqcNUP456qi3s0rJn5lziyJJmJ2y4Zw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
