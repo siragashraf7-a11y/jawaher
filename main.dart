@@ -476,7 +476,14 @@ class App extends StatelessWidget {
       title: 'محل الذهب والفضة',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: const Color(0xFFB8860B), useMaterial3: true),
-      builder: (c, child) => Directionality(textDirection: TextDirection.rtl, child: child!),
+      builder: (c, child) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: LayoutBuilder(
+          builder: (ctx, cons) => cons.maxWidth > 900
+              ? Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 900), child: child!))
+              : child!,
+        ),
+      ),
       home: loggedIn ? const HomeScreen() : const LoginScreen(),
     );
   }
