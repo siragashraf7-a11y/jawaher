@@ -1,8 +1,44 @@
-name: Build Windows
+name: Build All
 on:
   push:
   workflow_dispatch:
 jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Arrange files
+        run: |
+          mkdir -p lib
+          if [ -f main.dart ]; then mv main.dart lib/main.dart; fi
+      - name: Create firebase_options from google-services.json
+        run: |
+          API_KEY=$(jq -r '.client[0].api_key[0].current_key' google-services.json)
+          APP_ID=$(jq -r '.client[0].client_info.mobilesdk_app_id' google-services.json)
+          SENDER=$(jq -r '.project_info.project_number' google-services.json)
+          PROJECT=$(jq -r '.project_info.project_id' google-services.json)
+          printf "import 'package:firebase_core/firebase_core.dart';\nclass DefaultFirebaseOptions {\n  static const FirebaseOptions currentPlatform = FirebaseOptions(\n    apiKey: '%s',\n    appId: '%s',\n    messagingSenderId: '%s',\n    projectId: '%s',\n  );\n}\n" "$API_KEY" "$APP_ID" "$SENDER" "$PROJECT" > lib/firebase_options.dart
+      - name: Generate android folder
+        run: flutter create . --org com.goldshop --project-name gold_shop --platforms=android
+      - name: minSdk 23 and internet permission
+        run: |
+          sed -i 's/flutter.minSdkVersion/23/' android/app/build.gradle.kts android/app/build.gradle || true
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Jawaher-Android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: build/app/outputs/flutter-apk/Jawaher-Android.apk
+
   windows:
     runs-on: windows-latest
     env:
@@ -27,7 +63,28 @@ jobs:
         run: flutter create . --org com.goldshop --project-name gold_shop --platforms=windows
       - run: flutter pub get
       - run: flutter build windows --release
+      - name: Make folder portable (bundle runtime, remove extra files, rename exe)
+        shell: bash
+        run: |
+          R=build/windows/x64/runner/Release
+          for f in msvcp140.dll vcruntime140.dll vcruntime140_1.dll msvcp140_1.dll msvcp140_2.dll concrt140.dll; do
+            cp "/c/Windows/System32/$f" "$R/" || true
+          done
+          rm -f $R/*.lib $R/*.exp
+          mv $R/gold_shop.exe $R/Jawaher.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: gold-shop-windows
+          name: windows
           path: build/windows/x64/runner/Release
+
+  package:
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jawaher-All
+          path: out
