@@ -455,15 +455,45 @@ class _AddItemScreenState extends State<AddItemScreen> {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  FirebaseFirestore.instance.settings = const Settings(
-    persistenceEnabled: true, // الداتا تتحفظ على الجهاز وتشتغل من غير نت
-    cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
-  );
-  final prefs = await SharedPreferences.getInstance();
-  final user = prefs.getString('username');
-  if (user != null) Store.user = user;
-  runApp(App(loggedIn: user != null));
+  String? startupError;
+  bool loggedIn = false;
+  try {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform)
+        .timeout(const Duration(seconds: 25));
+    FirebaseFirestore.instance.settings = const Settings(
+      persistenceEnabled: true, // الداتا تتحفظ على الجهاز وتشتغل من غير نت
+      cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+    );
+    final prefs = await SharedPreferences.getInstance();
+    final user = prefs.getString('username');
+    if (user != null) Store.user = user;
+    loggedIn = user != null;
+  } catch (e) {
+    startupError = '$e';
+  }
+  runApp(startupError != null ? ErrorApp(message: startupError) : App(loggedIn: loggedIn));
+}
+
+/// بتظهر لو حصل خطأ وقت تشغيل البرنامج، بدل ما يقفل من غير ما نعرف السبب
+class ErrorApp extends StatelessWidget {
+  final String message;
+  const ErrorApp({super.key, required this.message});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Scaffold(
+        appBar: AppBar(title: const Text('حصل خطأ وقت التشغيل')),
+        body: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Directionality(
+            textDirection: TextDirection.ltr,
+            child: SelectableText(message),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class App extends StatelessWidget {
