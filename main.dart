@@ -555,6 +555,10 @@ Widget tf(String label, TextEditingController c,
 }
 
 /// عمليات البيع والشراء. بنستخدم batch من غير await عشان تشتغل من غير نت.
+/// 'pc' للكمبيوتر و 'phone' للتليفون. عمليات التليفون مبتظهرش على الكمبيوتر.
+final String deviceKind =
+    (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ? 'pc' : 'phone';
+
 Object _cnt(Item it, int delta) => it.hasCount ? FieldValue.increment(delta) : it.count + delta;
 
 class SaleLine {
@@ -605,8 +609,14 @@ class Ops {
   static CollectionReference<Map<String, dynamic>> col(String name) =>
       FirebaseFirestore.instance.collection('users').doc(Store.user).collection(name);
 
+  static Query<Map<String, dynamic>> _ops(String name, String metal) {
+    final q = col(name).where('metal', isEqualTo: metal);
+    // الكمبيوتر بيشوف عملياته هو بس. التليفون بيشوف كل العمليات.
+    return deviceKind == 'pc' ? q.where('device', isEqualTo: 'pc') : q;
+  }
+
   static Stream<List<Map<String, dynamic>>> watch(String name, String metal) =>
-      col(name).where('metal', isEqualTo: metal).snapshots().map((s) {
+      _ops(name, metal).snapshots().map((s) {
         final l = s.docs.map((d) => <String, dynamic>{...d.data(), 'id': d.id}).toList();
         l.sort((a, b) => (b['ts'] as Timestamp).compareTo(a['ts'] as Timestamp));
         return l;
@@ -657,6 +667,7 @@ class Ops {
       'customerName': customerName,
       'customerPhone': customerPhone,
       'ts': Timestamp.now(),
+      'device': deviceKind,
     });
     batch.commit();
   }
@@ -723,6 +734,7 @@ class Ops {
       'customerName': customerName,
       'customerPhone': customerPhone,
       'ts': Timestamp.now(),
+      'device': deviceKind,
     });
     batch.commit();
   }
@@ -743,6 +755,7 @@ class Ops {
       'customerName': customerName,
       'customerPhone': customerPhone,
       'ts': Timestamp.now(),
+      'device': deviceKind,
     });
   }
 
@@ -758,6 +771,7 @@ class Ops {
       'title': title,
       'amount': amount,
       'ts': Timestamp.now(),
+      'device': deviceKind,
     });
   }
 
@@ -851,6 +865,7 @@ class Ops {
       'fromBarcode': from.barcode,
       'toBarcode': toBarcode,
       'ts': Timestamp.now(),
+      'device': deviceKind,
     });
     b.commit();
   }
