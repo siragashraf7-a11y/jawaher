@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' show PointerDeviceKind;
 import 'package:barcode_widget/barcode_widget.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -98,6 +99,7 @@ class Store {
     required String photo,
     required List<double> weights,
   }) {
+    liveRefreshSoon();
     items.doc().set({
       'metal': metal,
       'karat': karat,
@@ -140,7 +142,8 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
-        child: ConstrainedBox(
+        child: SingleChildScrollView(
+          child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 400),
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -164,6 +167,7 @@ class _LoginScreenState extends State<LoginScreen> {
             ]),
           ),
         ),
+        ),
       ),
     );
   }
@@ -184,9 +188,10 @@ class HomeScreen extends StatelessWidget {
           constraints: const BoxConstraints(maxWidth: 500),
           child: Padding(
             padding: const EdgeInsets.all(20),
-            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            child: ListView(children: [
               for (final m in ['gold', 'silver'])
-                Expanded(
+                SizedBox(
+                  height: 200,
                   child: Card(
                     color: metalColors[m],
                     child: InkWell(
@@ -502,6 +507,7 @@ class App extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      scrollBehavior: const AppScrollBehavior(),
       title: 'محل الذهب والفضة',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: const Color(0xFFB8860B), useMaterial3: true),
@@ -670,6 +676,7 @@ class Ops {
       'device': deviceKind,
     });
     batch.commit();
+    liveRefreshSoon();
   }
 
   /// عملية شراء (أو قطع) واحدة فيها أكتر من منتج
@@ -737,6 +744,7 @@ class Ops {
       'device': deviceKind,
     });
     batch.commit();
+    liveRefreshSoon();
   }
 
   static void addPayment({
@@ -747,6 +755,7 @@ class Ops {
     required String customerName,
     required String customerPhone,
   }) {
+    liveRefreshSoon();
     col('payments').doc().set({
       'metal': metal,
       'kind': kind,
@@ -765,6 +774,7 @@ class Ops {
     required String title,
     required double amount,
   }) {
+    liveRefreshSoon();
     col('expenses').doc().set({
       'metal': metal,
       'type': type,
@@ -793,6 +803,7 @@ class Ops {
       b.delete(col('payments').doc(id));
     }
     b.commit();
+    liveRefreshSoon();
   }
 
   static void deletePurchase(Map<String, dynamic> m, List<String> paymentIds, List<Item> items) {
@@ -816,6 +827,7 @@ class Ops {
       b.delete(col('payments').doc(id));
     }
     b.commit();
+    liveRefreshSoon();
   }
 
   static void convert({
@@ -868,6 +880,7 @@ class Ops {
       'device': deviceKind,
     });
     b.commit();
+    liveRefreshSoon();
   }
 }
 
@@ -1765,6 +1778,7 @@ Future<void> editOp(BuildContext context, Map<String, dynamic> m, bool isSale, M
   final paid = pn(r['المبلغ المدفوع']);
   if (total == null || total <= 0 || paid == null || paid < 0) return err('قيم غير صحيحة');
   if (paid + (d.paySum[id] ?? 0.0) > total + 0.005) return err('المدفوع أكبر من الإجمالي');
+  liveRefreshSoon();
   Ops.col(isSale ? 'sales' : 'purchases').doc(id).update({
     totalKey: total,
     'paid': paid,
@@ -1919,6 +1933,7 @@ class HistoryScreen extends StatelessWidget {
                           onTap: () async {
                             if (await confirmDialog(context, 'مسح المصروف ده؟')) {
                               Ops.col('expenses').doc(m['id'] as String).delete();
+                              liveRefreshSoon();
                             }
                           },
                         ),
@@ -2478,8 +2493,8 @@ class _Live {
         if (c.hasListener) c.add(l);
       });
     }
-    _tick();
-    timer = Timer.periodic(const Duration(seconds: 2), (_) => _tick());
+    tick(force: true);
+    timer = Timer.periodic(const Duration(seconds: 5), (_) => tick());
   }
 
   void _stop() {
@@ -2487,27 +2502,29 @@ class _Live {
     timer = null;
   }
 
-  Future<void> _tick() async {
+  void _emit(QuerySnapshot<Map<String, dynamic>> snap) {
+    final sig = snap.docs.map((d) => '${d.id}:${d.data()}').join('|').hashCode;
+    if (last == null || sig != lastSig) {
+      last = snap;
+      lastSig = sig;
+      if (c.hasListener) c.add(snap);
+    }
+  }
+
+  Future<void> tick({bool force = false}) async {
     if (busy) return;
+    final now = DateTime.now();
+    if (!force && serverAt != null && now.difference(serverAt!).inSeconds < serverSeconds) return;
     busy = true;
+    serverAt = now;
     try {
-      final now = DateTime.now();
-      final needServer = serverAt == null || now.difference(serverAt!).inSeconds >= serverSeconds;
-      QuerySnapshot<Map<String, dynamic>>? snap;
-      if (needServer) {
-        serverAt = now;
+      _emit(await q.get());
+    } catch (_) {
+      if (last == null) {
         try {
-          snap = await q.get(const GetOptions(source: Source.server));
+          _emit(await q.get(const GetOptions(source: Source.cache)));
         } catch (_) {}
       }
-      snap ??= await q.get(const GetOptions(source: Source.cache));
-      final sig = snap.docs.map((d) => '${d.id}:${d.data()}').join('|').hashCode;
-      if (last == null || sig != lastSig) {
-        last = snap;
-        lastSig = sig;
-        if (c.hasListener) c.add(snap);
-      }
-    } catch (_) {
     } finally {
       busy = false;
     }
@@ -2523,4 +2540,28 @@ Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
 }) {
   if (!Platform.isWindows) return q.snapshots();
   return _liveMap.putIfAbsent(key, () => _Live(q, serverSeconds)).stream;
+}
+
+/// بعد أي كتابة بنحدّث القراءة من السيرفر بعد ثانيتين وبعد 8 ثواني (الكمبيوتر بس)
+void liveRefresh() {
+  for (final l in _liveMap.values) {
+    if (l.timer != null) l.tick(force: true);
+  }
+}
+
+void liveRefreshSoon() {
+  Future.delayed(const Duration(seconds: 2), liveRefresh);
+  Future.delayed(const Duration(seconds: 8), liveRefresh);
+}
+
+/// تمكين السحب بالماوس واللمس لتحريك الصفحات فوق وتحت
+class AppScrollBehavior extends MaterialScrollBehavior {
+  const AppScrollBehavior();
+  @override
+  Set<PointerDeviceKind> get dragDevices => {
+        PointerDeviceKind.touch,
+        PointerDeviceKind.mouse,
+        PointerDeviceKind.stylus,
+        PointerDeviceKind.trackpad,
+      };
 }
