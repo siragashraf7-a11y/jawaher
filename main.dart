@@ -77,11 +77,10 @@ class Store {
       _db.collection('users').doc(user).collection('items');
 
   /// الذهب والفضة منفصلين بالـ metal
-  static Stream<List<Item>> watchItems(String metal) => items
-      .where('metal', isEqualTo: metal)
-      .snapshots()
-      .map((s) => s.docs.map(Item.fromDoc).toList()
-        ..sort((a, b) => a.karat.compareTo(b.karat)));
+  static Stream<List<Item>> watchItems(String metal) =>
+      liveQuery('items:$user:$metal', items.where('metal', isEqualTo: metal), serverSeconds: 60)
+          .map((s) => s.docs.map(Item.fromDoc).toList()
+            ..sort((a, b) => a.karat.compareTo(b.karat)));
 
   /// باركود فريد من غير نت: حرف المعدن + العيار + الوقت
   static String newBarcode(String metal, int karat) {
@@ -616,7 +615,8 @@ class Ops {
   }
 
   static Stream<List<Map<String, dynamic>>> watch(String name, String metal) =>
-      _ops(name, metal).snapshots().map((s) {
+      liveQuery('$name:${Store.user}:$metal:$deviceKind', _ops(name, metal), serverSeconds: 180)
+          .map((s) {
         final l = s.docs.map((d) => <String, dynamic>{...d.data(), 'id': d.id}).toList();
         l.sort((a, b) => (b['ts'] as Timestamp).compareTo(a['ts'] as Timestamp));
         return l;
@@ -2448,4 +2448,79 @@ class _ConvertScreenState extends State<ConvertScreen> {
       ),
     );
   }
+}
+
+
+// ======================= قراءة البيانات (الكمبيوتر) =======================
+// على ويندوز مكتبة Firebase بتقفل البرنامج لما نستخدم الاستماع اللحظي (snapshots)،
+// فبنستبدله بقراءة دورية: من الجهاز كل ثانيتين (مجاناً) ومن السيرفر كل فترة.
+// على الأندرويد بيفضل الاستماع اللحظي زي ما هو.
+
+class _Live {
+  final Query<Map<String, dynamic>> q;
+  final int serverSeconds;
+  _Live(this.q, this.serverSeconds);
+
+  late final StreamController<QuerySnapshot<Map<String, dynamic>>> c =
+      StreamController.broadcast(onListen: _start, onCancel: _stop);
+  QuerySnapshot<Map<String, dynamic>>? last;
+  int lastSig = 0;
+  DateTime? serverAt;
+  Timer? timer;
+  bool busy = false;
+
+  Stream<QuerySnapshot<Map<String, dynamic>>> get stream => c.stream;
+
+  void _start() {
+    final l = last;
+    if (l != null) {
+      Future.microtask(() {
+        if (c.hasListener) c.add(l);
+      });
+    }
+    _tick();
+    timer = Timer.periodic(const Duration(seconds: 2), (_) => _tick());
+  }
+
+  void _stop() {
+    timer?.cancel();
+    timer = null;
+  }
+
+  Future<void> _tick() async {
+    if (busy) return;
+    busy = true;
+    try {
+      final now = DateTime.now();
+      final needServer = serverAt == null || now.difference(serverAt!).inSeconds >= serverSeconds;
+      QuerySnapshot<Map<String, dynamic>>? snap;
+      if (needServer) {
+        serverAt = now;
+        try {
+          snap = await q.get(const GetOptions(source: Source.server));
+        } catch (_) {}
+      }
+      snap ??= await q.get(const GetOptions(source: Source.cache));
+      final sig = snap.docs.map((d) => '${d.id}:${d.data()}').join('|').hashCode;
+      if (last == null || sig != lastSig) {
+        last = snap;
+        lastSig = sig;
+        if (c.hasListener) c.add(snap);
+      }
+    } catch (_) {
+    } finally {
+      busy = false;
+    }
+  }
+}
+
+final Map<String, _Live> _liveMap = {};
+
+Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
+  String key,
+  Query<Map<String, dynamic>> q, {
+  int serverSeconds = 60,
+}) {
+  if (!Platform.isWindows) return q.snapshots();
+  return _liveMap.putIfAbsent(key, () => _Live(q, serverSeconds)).stream;
 }
