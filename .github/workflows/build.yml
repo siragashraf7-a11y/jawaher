@@ -1,46 +1,12 @@
-name: Build All
+name: Build Windows Installer
 on:
   push:
   workflow_dispatch:
 jobs:
-  android:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-      - name: Arrange files
-        run: |
-          mkdir -p lib
-          if [ -f main.dart ]; then mv main.dart lib/main.dart; fi
-      - name: Create firebase_options from google-services.json
-        run: |
-          API_KEY=$(jq -r '.client[0].api_key[0].current_key' google-services.json)
-          APP_ID=$(jq -r '.client[0].client_info.mobilesdk_app_id' google-services.json)
-          SENDER=$(jq -r '.project_info.project_number' google-services.json)
-          PROJECT=$(jq -r '.project_info.project_id' google-services.json)
-          printf "import 'package:firebase_core/firebase_core.dart';\nclass DefaultFirebaseOptions {\n  static const FirebaseOptions currentPlatform = FirebaseOptions(\n    apiKey: '%s',\n    appId: '%s',\n    messagingSenderId: '%s',\n    projectId: '%s',\n  );\n}\n" "$API_KEY" "$APP_ID" "$SENDER" "$PROJECT" > lib/firebase_options.dart
-      - name: Generate android folder
-        run: flutter create . --org com.goldshop --project-name gold_shop --platforms=android
-      - name: minSdk 23 and internet permission
-        run: |
-          sed -i 's/flutter.minSdkVersion/23/' android/app/build.gradle.kts android/app/build.gradle || true
-          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
-      - run: flutter pub get
-      - run: flutter build apk --release
-      - run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Jawaher-Android.apk
-      - uses: actions/upload-artifact@v4
-        with:
-          name: android
-          path: build/app/outputs/flutter-apk/Jawaher-Android.apk
-
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
     env:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
@@ -63,7 +29,7 @@ jobs:
         run: flutter create . --org com.goldshop --project-name gold_shop --platforms=windows
       - run: flutter pub get
       - run: flutter build windows --release
-      - name: Make folder portable (bundle runtime, remove extra files, rename exe)
+      - name: Bundle runtime and build single-file installer
         shell: bash
         run: |
           R=build/windows/x64/runner/Release
@@ -72,19 +38,38 @@ jobs:
           done
           rm -f $R/*.lib $R/*.exp
           mv $R/gold_shop.exe $R/Jawaher.exe
+          choco install innosetup -y --no-progress
+          cat > installer.iss <<'ISS'
+          [Setup]
+          AppId={{8F3B6A2C-5D41-4E7B-9C21-3A6D5F0B7E11}
+          AppName=Jawaher
+          AppVersion=1.0
+          DefaultDirName={autopf}\Jawaher
+          DisableProgramGroupPage=yes
+          PrivilegesRequired=lowest
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+          OutputDir=installer
+          OutputBaseFilename=Jawaher-Setup
+          Compression=lzma2
+          SolidCompression=yes
+          [Files]
+          Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+          [Icons]
+          Name: "{autoprograms}\Jawaher"; Filename: "{app}\Jawaher.exe"
+          Name: "{autodesktop}\Jawaher"; Filename: "{app}\Jawaher.exe"
+          [Run]
+          Filename: "{app}\Jawaher.exe"; Description: "Run Jawaher"; Flags: nowait postinstall skipifsilent
+          ISS
+          ISCC="$(ls -d /c/Program\ Files*/Inno\ Setup*/ISCC.exe 2>/dev/null | head -n 1)"
+          if [ -z "$ISCC" ]; then echo "Inno Setup not found"; exit 1; fi
+          "$ISCC" installer.iss
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
-          path: build/windows/x64/runner/Release
-
-  package:
-    needs: [android, windows]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
+          name: installer
+          path: installer/Jawaher-Setup.exe
+      - uses: softprops/action-gh-release@v2
         with:
-          path: out
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Jawaher-All
-          path: out
+          tag_name: latest
+          name: Jawaher PC (latest)
+          files: installer/Jawaher-Setup.exe
