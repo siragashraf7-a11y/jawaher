@@ -815,6 +815,7 @@ class BuyLine {
   final double weight;
   final int count;
   final double price;
+  final bool scrap;
   const BuyLine({
     required this.existing,
     required this.karat,
@@ -824,6 +825,7 @@ class BuyLine {
     required this.weight,
     required this.count,
     required this.price,
+    this.scrap = false,
   });
 }
 
