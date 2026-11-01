@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -39,6 +40,7 @@ class Item {
   final bool hasCount;
   final String supplier;
   final String kind;
+  final String branch;
   Item({
     required this.id,
     required this.metal,
@@ -53,6 +55,7 @@ class Item {
     this.hasCount = true,
     this.supplier = '',
     this.kind = 'normal',
+    this.branch = '',
   });
 
   factory Item.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -70,6 +73,7 @@ class Item {
       hasCount: m['count'] != null,
       supplier: '${m['supplier'] ?? ''}',
       kind: '${m['kind'] ?? 'normal'}',
+      branch: '${m['branch'] ?? ''}',
       count: m['count'] != null
           ? (m['count'] as num).toInt()
           : ((m['weights'] as List).length - ((m['soldIdx'] ?? []) as List).length).clamp(0, 100000),
@@ -120,6 +124,7 @@ class Store {
       'name': name,
       'barcode': barcode,
       'photo': photo,
+      'branch': Prefs.branch,
       'weights': weights,
       'remaining': weights.fold<double>(0, (a, b) => a + b),
       'count': weights.length,
@@ -149,7 +154,8 @@ class _LoginScreenState extends State<LoginScreen> {
     await prefs.setString('username', name);
     Store.user = name;
     if (!mounted) return;
-    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+    Navigator.pushReplacement(
+        context, MaterialPageRoute(builder: (_) => const ApprovalGate(child: HomeScreen())));
   }
 
   @override
@@ -277,7 +283,8 @@ class InventoryScreen extends StatelessWidget {
               borderRadius: BorderRadius.circular(6),
               child: Image.memory(i.photoBytes!, width: 50, height: 50, fit: BoxFit.cover)),
       title: Text('عيار ${i.karat}${i.name.isEmpty ? '' : ' - ${i.name}'}'),
-      subtitle: Text('${i.count} قطعة | المتبقي ${money(i.remaining)} جم'),
+      subtitle: Text(
+          '${i.count} قطعة | المتبقي ${money(i.remaining)} جم${i.branch.isEmpty ? '' : ' | الفرع: ${i.branch}'}'),
       trailing: Text(i.barcode, textDirection: TextDirection.ltr),
       onTap: () =>
           Navigator.push(context, MaterialPageRoute(builder: (_) => ItemDetailScreen(item: i))),
@@ -361,10 +368,22 @@ class InventoryScreen extends StatelessWidget {
                         child: Text('الكسر (بالوزن فقط)',
                             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black87)),
                       ),
+                      for (final k in karatsOf(metal))
+                        if (scrap.any((x) => x.karat == k))
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(14, 6, 14, 0),
+                            child: Text(
+                              'عيار $k: ${money(scrap.where((x) => x.karat == k).fold<double>(0.0, (a, x) => a + x.remaining))} جم',
+                              style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87),
+                            ),
+                          ),
+                      const Divider(),
                       for (final i in scrap)
                         ListTile(
                           dense: true,
-                          title: Text('عيار ${i.karat}', style: const TextStyle(color: Colors.black87)),
+                          title: Text(
+                              'عيار ${i.karat}${i.name.isEmpty ? '' : ' - ${i.name}'}${i.branch.isEmpty ? '' : '  (${i.branch})'}',
+                              style: const TextStyle(color: Colors.black87)),
                           trailing: Text('${money(i.remaining)} جم',
                               style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87)),
                           onTap: () => Navigator.push(
@@ -451,7 +470,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
       body: PageList(
         padding: const EdgeInsets.all(16),
         children: [
-          if (!item.isScrap) ...[
+          ...[
             Center(
               child: pic == null
                   ? const Icon(Icons.image_not_supported, size: 90)
@@ -477,6 +496,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
               ],
             ),
             const SizedBox(height: 16),
+            if (!item.isScrap)
             Container(
               color: Colors.white,
               padding: const EdgeInsets.all(12),
@@ -488,9 +508,9 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
               style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           if (!item.isScrap) Text('العدد: ${item.count} قطعة'),
           if (item.supplier.isNotEmpty) Text('التاجر / المورد: ${item.supplier}'),
+          if (item.branch.isNotEmpty) Text('الفرع: ${item.branch}'),
           const SizedBox(height: 8),
-          if (!item.isScrap)
-            OutlinedButton.icon(
+          OutlinedButton.icon(
               onPressed: _editName,
               icon: const Icon(Icons.edit),
               label: const Text('تعديل الاسم / الوصف'),
@@ -742,7 +762,7 @@ class App extends StatelessWidget {
               ),
             );
           },
-          home: loggedIn ? const HomeScreen() : const LoginScreen(),
+          home: loggedIn ? const ApprovalGate(child: HomeScreen()) : const LoginScreen(),
         ),
       ),
     );
@@ -898,6 +918,7 @@ class Ops {
       maps.add({
         'itemId': l.item.id,
         'barcode': l.item.barcode,
+        'name': l.item.name,
         'karat': l.item.karat,
         'weight': l.weight,
         'count': l.count,
@@ -921,6 +942,8 @@ class Ops {
       'customerPhone': customerPhone,
       'ts': Timestamp.now(),
       'device': deviceKind,
+      'branch': Prefs.branch,
+      'deviceId': Prefs.deviceId,
     };
     batch.set(col('sales').doc(), doc);
     batch.set(_serialRef(metal, 'sale'), {'n': serial.$2});
@@ -946,33 +969,33 @@ class Ops {
     final maps = <Map<String, dynamic>>[];
     for (final l in lines) {
       if (l.scrap) {
-        // الكسر: خانة واحدة لكل عيار، بالوزن بس
-        final ref = Store.items.doc('scrap-$metal-${l.karat}');
-        batch.set(
-          ref,
-          {
-            'metal': metal,
-            'karat': l.karat,
-            'kind': 'scrap',
-            'name': 'كسر',
-            'barcode': 'SCRAP-$metal-${l.karat}',
-            'photo': '',
-            'weights': <double>[],
-            'count': 0,
-            'remaining': FieldValue.increment(l.weight),
-          },
-          SetOptions(merge: true),
-        );
+        // الكسر: كل عملية بتتسجل كلوت له اسم وصورة، وبيتجمع في خانة الكسر حسب العيار
+        final ref = Store.items.doc();
+        batch.set(ref, {
+          'metal': metal,
+          'karat': l.karat,
+          'kind': 'scrap',
+          'name': l.desc,
+          'barcode': l.barcode,
+          'photo': l.photo,
+          'weights': <double>[],
+          'count': 0,
+          'remaining': l.weight,
+          'supplier': supplier,
+          'branch': Prefs.branch,
+          'createdAt': Timestamp.now(),
+        });
         price += l.price;
         weight += l.weight;
         maps.add({
           'itemId': ref.id,
-          'barcode': 'SCRAP-$metal-${l.karat}',
+          'barcode': l.barcode,
           'karat': l.karat,
+          'name': l.desc,
           'weight': l.weight,
           'count': 0,
           'price': l.price,
-          'newItem': false,
+          'newItem': true,
           'scrap': true,
           'pieceIdx': <int>[],
         });
@@ -999,6 +1022,7 @@ class Ops {
           'remaining': l.weight,
           'count': l.count,
           'supplier': supplier,
+          'branch': Prefs.branch,
           'kind': 'normal',
           'createdAt': Timestamp.now(),
         });
@@ -1014,6 +1038,7 @@ class Ops {
         'count': l.count,
         'price': l.price,
         'newItem': ex == null,
+        'name': ex != null ? ex.name : l.desc,
         'pieceIdx': [for (var i = 0; i < l.count; i++) start + i],
       });
     }
@@ -1031,6 +1056,8 @@ class Ops {
       'customerPhone': customerPhone,
       'ts': Timestamp.now(),
       'device': deviceKind,
+      'branch': Prefs.branch,
+      'deviceId': Prefs.deviceId,
     };
     batch.set(col('purchases').doc(), doc);
     batch.set(_serialRef(metal, 'buy'), {'n': serial.$2});
@@ -1057,6 +1084,8 @@ class Ops {
       'customerPhone': customerPhone,
       'ts': Timestamp.now(),
       'device': deviceKind,
+      'branch': Prefs.branch,
+      'deviceId': Prefs.deviceId,
     });
   }
 
@@ -1074,6 +1103,8 @@ class Ops {
       'amount': amount,
       'ts': Timestamp.now(),
       'device': deviceKind,
+      'branch': Prefs.branch,
+      'deviceId': Prefs.deviceId,
     });
   }
 
@@ -1101,6 +1132,10 @@ class Ops {
   static void deletePurchase(Map<String, dynamic> m, List<String> paymentIds, List<Item> items) {
     final b = FirebaseFirestore.instance.batch();
     for (final l in linesOf(m, false)) {
+      if (l['scrap'] == true) {
+        b.delete(Store.items.doc(l['itemId'] as String));
+        continue;
+      }
       final raw = l['pieceIdx'];
       final List<int> idxs = raw is List
           ? raw.map((e) => (e as num).toInt()).toList()
@@ -1153,6 +1188,7 @@ class Ops {
         'name': 'محوّل من عيار ${from.karat}',
         'barcode': toBarcode,
         'photo': '',
+        'branch': Prefs.branch,
         'weights': newWeights,
         'remaining': toWeight,
         'count': count,
@@ -1170,6 +1206,8 @@ class Ops {
       'toBarcode': toBarcode,
       'ts': Timestamp.now(),
       'device': deviceKind,
+      'branch': Prefs.branch,
+      'deviceId': Prefs.deviceId,
     });
     b.commit();
     liveRefreshSoon();
@@ -1310,7 +1348,7 @@ class ItemPicker extends StatelessWidget {
                           leading: _thumb(i),
                           title: Text(i.barcode, textDirection: TextDirection.ltr),
                           subtitle: Text(
-                              'عيار ${i.karat}${i.name.isEmpty ? '' : ' - ${i.name}'} | المتبقي ${money(i.remaining)} جم | العدد ${i.count}'),
+                              'عيار ${i.karat}${i.name.isEmpty ? '' : ' - ${i.name}'} | المتبقي ${money(i.remaining)} جم | العدد ${i.count}${i.branch.isEmpty ? '' : ' | الفرع: ${i.branch}'}'),
                           onTap: () => onSel(i),
                         ),
                     ],
@@ -1365,7 +1403,8 @@ class ItemInfo extends StatelessWidget {
             ? const Icon(Icons.diamond)
             : Image.memory(item.photoBytes!, width: 50, height: 50, fit: BoxFit.cover),
         title: Text('عيار ${item.karat}${item.name.isEmpty ? '' : ' - ${item.name}'}'),
-        subtitle: Text('المتبقي: ${money(item.remaining)} جم | العدد: ${item.count}'),
+        subtitle: Text(
+            'المتبقي: ${money(item.remaining)} جم | العدد: ${item.count}${item.branch.isEmpty ? '' : ' | الفرع: ${item.branch}'}'),
       ),
     );
   }
@@ -1700,9 +1739,6 @@ class _BuyScreenState extends State<BuyScreen> {
     if (mode == 0 && o != null && cart.any((l) => l.existing?.id == o.id)) {
       return _msg('المنتج ده مضاف بالفعل في العملية');
     }
-    if (mode == 2 && cart.any((l) => l.scrap && l.karat == karat)) {
-      return _msg('الكسر لنفس العيار مضاف بالفعل، عدّل وزنه أو امسحه');
-    }
     final wt = parseNum(w);
     if (wt == null || wt <= 0) return _msg('اكتب الوزن');
     final cn = mode == 2 ? 0 : (int.tryParse(cnt.text.trim()) ?? 0);
@@ -1712,8 +1748,8 @@ class _BuyScreenState extends State<BuyScreen> {
     cart.add(BuyLine(
       existing: mode == 0 ? o : null,
       karat: mode == 0 ? o!.karat : karat,
-      barcode: mode == 0 ? o!.barcode : (mode == 2 ? 'SCRAP-${widget.metal}-$karat' : barcode),
-      photo: mode == 1 ? photo : '',
+      barcode: mode == 0 ? o!.barcode : barcode,
+      photo: mode != 0 ? photo : '',
       desc: desc.text.trim(),
       weight: wt,
       count: cn,
@@ -1807,7 +1843,7 @@ class _BuyScreenState extends State<BuyScreen> {
               onSelected: (i) => setState(() => old = i),
             ),
             if (old != null) ItemInfo(old!),
-          ] else if (mode == 1) ...[
+          ] else ...[
             Center(
               child: InkWell(
                 onTap: () async {
@@ -1842,17 +1878,6 @@ class _BuyScreenState extends State<BuyScreen> {
             ),
             const SizedBox(height: 12),
             tf('وصف / اسم المنتج (اختياري)', desc, type: TextInputType.text),
-          ] else ...[
-            DropdownButtonFormField<int>(
-              value: karat,
-              decoration: const InputDecoration(label: Text('عيار الكسر'), border: OutlineInputBorder()),
-              items: [
-                for (final k in karatsOf(widget.metal))
-                  DropdownMenuItem(value: k, child: Text('عيار $k')),
-              ],
-              onChanged: (v) => setState(() => karat = v!),
-            ),
-            const SizedBox(height: 12),
           ],
           tf('الوزن (جرام)', w),
           if (mode != 2) tf('العدد (قطعة)', cnt, type: TextInputType.number),
@@ -3149,6 +3174,13 @@ const List<List<String>> _dict = [
   ['اللغة', 'Language', 'Sprache', 'Langue', 'Lingua', 'Idioma'],
   ['الهدف', 'Target', 'Ziel', 'Objectif', 'Obiettivo', 'Objetivo'],
   ['رقم النسخة', 'Version', 'Version', 'Version', 'Versione', 'Versión'],
+  ['اسم الفرع', 'Branch name', 'Filialname', 'Nom de la succursale', 'Nome filiale', 'Nombre de la sucursal'],
+  ['الفرع', 'Branch', 'Filiale', 'Succursale', 'Filiale', 'Sucursal'],
+  ['في انتظار موافقة المسؤول', 'Waiting for admin approval', 'Warten auf Freigabe des Administrators', "En attente de l'approbation de l'administrateur", "In attesa di approvazione dell'amministratore", 'Esperando la aprobación del administrador'],
+  ['تم رفض هذا الجهاز أو إيقافه من المسؤول', 'This device was rejected or suspended by the admin', 'Dieses Gerät wurde vom Administrator abgelehnt oder gesperrt', "Cet appareil a été refusé ou suspendu par l'administrateur", "Questo dispositivo è stato rifiutato o sospeso dall'amministratore", 'Este dispositivo fue rechazado o suspendido por el administrador'],
+  ['تعذر الاتصال بالإنترنت', 'No internet connection', 'Keine Internetverbindung', 'Pas de connexion Internet', 'Nessuna connessione Internet', 'Sin conexión a Internet'],
+  ['تحديث الحالة', 'Refresh status', 'Status aktualisieren', 'Actualiser le statut', 'Aggiorna stato', 'Actualizar estado'],
+  ['كود الجهاز', 'Device code', 'Gerätecode', "Code de l'appareil", 'Codice dispositivo', 'Código del dispositivo'],
 ];
 
 final Map<String, String> _trCache = {};
@@ -3215,6 +3247,9 @@ class Prefs {
   static String shopPhone = '';
   static String shopAddress = '';
   static String paper = '80';
+  static String branch = '';
+  static String deviceId = '';
+  static bool approved = false;
   static double targetGold = 0.0;
   static double targetSilver = 0.0;
 
@@ -3226,6 +3261,15 @@ class Prefs {
     shopPhone = p.getString('shopPhone') ?? shopPhone;
     shopAddress = p.getString('shopAddress') ?? shopAddress;
     paper = p.getString('paper') ?? paper;
+    branch = p.getString('branch') ?? '';
+    approved = p.getBool('approved') ?? false;
+    var id = p.getString('deviceId');
+    if (id == null || id.isEmpty) {
+      final r = math.Random.secure();
+      id = List.generate(24, (_) => r.nextInt(16).toRadixString(16)).join();
+      await p.setString('deviceId', id);
+    }
+    deviceId = id!;
     targetGold = p.getDouble('targetGold') ?? 0.0;
     targetSilver = p.getDouble('targetSilver') ?? 0.0;
     appLang.value = p.getString('lang') ?? 'ar';
@@ -3238,6 +3282,8 @@ class Prefs {
     await p.setString('shopPhone', shopPhone);
     await p.setString('shopAddress', shopAddress);
     await p.setString('paper', paper);
+    await p.setString('branch', branch);
+    await p.setBool('approved', approved);
     await p.setDouble('targetGold', targetGold);
     await p.setDouble('targetSilver', targetSilver);
     await p.setString('lang', appLang.value);
@@ -3421,7 +3467,7 @@ class Updater {
     return f;
   }
 
-  static Future<void> check({bool manual = false}) async {
+  static Future<void> check({bool manual = false, bool force = false}) async {
     if (checking) return;
     checking = true;
     try {
@@ -3454,7 +3500,7 @@ class Updater {
         if (u != null) await _windows(u);
       } else if (Platform.isAndroid) {
         final u = urlOf('Jawaher-Android.apk');
-        if (u != null) await _android(u);
+        if (u != null) await _android(u, force);
       }
     } catch (_) {
       if (manual) _toast('تعذر فحص التحديث');
@@ -3496,15 +3542,16 @@ class Updater {
     exit(0);
   }
 
-  static Future<void> _android(String url) async {
+  static Future<void> _android(String url, bool force) async {
     final ctx = navKey.currentContext;
     if (ctx == null) return;
     final go = await showDialog<bool>(
       context: ctx,
+      barrierDismissible: !force,
       builder: (c) => AlertDialog(
         title: const Text('تحديث جديد متاح'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('لاحقاً')),
+          if (!force) TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('لاحقاً')),
           FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('تحديث الآن')),
         ],
       ),
@@ -3526,6 +3573,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final shop = TextEditingController(text: Prefs.shopName);
   final phone = TextEditingController(text: Prefs.shopPhone);
   final address = TextEditingController(text: Prefs.shopAddress);
+  final branch = TextEditingController(text: Prefs.branch);
   final tGold = TextEditingController(text: Prefs.targetGold > 0 ? Prefs.targetGold.toStringAsFixed(0) : '');
   final tSilver = TextEditingController(text: Prefs.targetSilver > 0 ? Prefs.targetSilver.toStringAsFixed(0) : '');
   String paper = Prefs.paper;
@@ -3534,6 +3582,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     Prefs.shopName = shop.text.trim();
     Prefs.shopPhone = phone.text.trim();
     Prefs.shopAddress = address.text.trim();
+    Prefs.branch = branch.text.trim();
     Prefs.paper = paper;
     Prefs.targetGold = parseNum(tGold) ?? 0.0;
     Prefs.targetSilver = parseNum(tSilver) ?? 0.0;
@@ -3552,6 +3601,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           tf('اسم المحل', shop, type: TextInputType.text),
           tf('رقم تليفون المحل', phone, type: TextInputType.phone),
           tf('عنوان المحل', address, type: TextInputType.text),
+          tf('اسم الفرع', branch, type: TextInputType.text),
           DropdownButtonFormField<String>(
             value: paper,
             decoration: const InputDecoration(label: Text('مقاس ورق الطباعة'), border: OutlineInputBorder()),
@@ -3655,6 +3705,15 @@ class _InvoiceScreenState extends State<InvoiceScreen> {
         roll: roll);
   }
 
+  String _lineLabel(Map<String, dynamic> op, Map<String, dynamic> l) {
+    var nm = '${l['name'] ?? ''}'.trim();
+    if (nm == 'كسر') nm = '';
+    final base = l['scrap'] == true && nm.isEmpty
+        ? '${metalNames[op['metal']] ?? ''} عيار ${l['karat']}'
+        : 'عيار ${l['karat']}';
+    return nm.isEmpty ? base : '$nm\n$base';
+  }
+
   Widget _row(String a, String b, {bool bold = false}) => Padding(
         padding: const EdgeInsets.symmetric(vertical: 2),
         child: Row(
@@ -3717,12 +3776,7 @@ class _InvoiceScreenState extends State<InvoiceScreen> {
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 2),
                 child: Row(children: [
-                  _cell(
-                    l['scrap'] == true
-                        ? '${metalNames[op['metal']] ?? ''} عيار ${l['karat']}'
-                        : 'عيار ${l['karat']}',
-                    4,
-                  ),
+                  _cell(_lineLabel(op, l), 4),
                   _cell(money(nd(l['weight'])), 2),
                   _cell(l['scrap'] == true || (l['count'] ?? 0) == 0 ? '-' : '${l['count']}', 1),
                   _cell(money(nd(isSale ? l['total'] : (l['price'] ?? l['total'] ?? 0))), 2),
@@ -4389,6 +4443,158 @@ class _PageListState extends State<PageList> {
           ),
         ),
       ],
+    );
+  }
+}
+
+
+// ======================= موافقة المسؤول على الأجهزة =======================
+
+class Device {
+  static bool updateRequested = false;
+  static DateTime _lastSeenWrite = DateTime.fromMillisecondsSinceEpoch(0);
+
+  static DocumentReference<Map<String, dynamic>> get ref =>
+      FirebaseFirestore.instance.collection('devices').doc(Prefs.deviceId);
+
+  /// بترجع: approved / pending / rejected / error
+  static Future<String> sync() async {
+    try {
+      final snap = await ref.get().timeout(const Duration(seconds: 10));
+      // لو المسؤول لسه ما فعّلش النظام (من برنامج المسؤول) كل الأجهزة بتدخل
+      final cfg = await FirebaseFirestore.instance
+          .collection('admin')
+          .doc('config')
+          .get()
+          .timeout(const Duration(seconds: 10));
+      final enforced = cfg.exists && cfg.data()?['pinHash'] != null;
+      final now = Timestamp.now();
+      final info = <String, dynamic>{
+        'username': Store.user,
+        'kind': deviceKind,
+        'branch': Prefs.branch,
+        'build': kBuild,
+        'os': Platform.operatingSystem,
+        'lastSeen': now,
+      };
+      if (!snap.exists) {
+        await ref.set({...info, 'status': 'pending', 'requestedAt': now}).timeout(const Duration(seconds: 10));
+        return enforced ? 'pending' : 'approved';
+      }
+      final data = snap.data() ?? <String, dynamic>{};
+      if (data['forceUpdate'] == true) {
+        updateRequested = true;
+        ref.set({'forceUpdate': false, 'updateAckAt': now}, SetOptions(merge: true));
+      }
+      if (DateTime.now().difference(_lastSeenWrite).inMinutes >= 10) {
+        _lastSeenWrite = DateTime.now();
+        ref.set(info, SetOptions(merge: true));
+      }
+      final st = '${data['status'] ?? 'pending'}';
+      return enforced ? st : 'approved';
+    } catch (_) {
+      return 'error';
+    }
+  }
+}
+
+class ApprovalGate extends StatefulWidget {
+  final Widget child;
+  const ApprovalGate({super.key, required this.child});
+  @override
+  State<ApprovalGate> createState() => _ApprovalGateState();
+}
+
+class _ApprovalGateState extends State<ApprovalGate> {
+  late String status = Prefs.approved ? 'approved' : 'checking';
+  Timer? timer;
+  bool busy = false;
+  DateTime lastOk = DateTime.fromMillisecondsSinceEpoch(0);
+
+  @override
+  void initState() {
+    super.initState();
+    _check(force: true);
+    timer = Timer.periodic(const Duration(seconds: 5), (_) => _check());
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _check({bool force = false}) async {
+    if (busy) return;
+    if (!force && status == 'approved' && DateTime.now().difference(lastOk).inSeconds < 60) return;
+    busy = true;
+    final st = await Device.sync();
+    busy = false;
+    if (Device.updateRequested) {
+      Device.updateRequested = false;
+      Updater.check(force: true);
+    }
+    if (!mounted) return;
+    if (st == 'error') {
+      if (status == 'checking') setState(() => status = 'error');
+      return;
+    }
+    lastOk = DateTime.now();
+    final ok = st == 'approved';
+    if (ok != Prefs.approved) {
+      Prefs.approved = ok;
+      Prefs.save();
+    }
+    if (st != status) setState(() => status = st);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (status == 'approved') return widget.child;
+    final code = Prefs.deviceId.length >= 8 ? Prefs.deviceId.substring(0, 8).toUpperCase() : Prefs.deviceId;
+    IconData icon;
+    String title;
+    switch (status) {
+      case 'pending':
+        icon = Icons.hourglass_top;
+        title = 'في انتظار موافقة المسؤول';
+        break;
+      case 'rejected':
+        icon = Icons.block;
+        title = 'تم رفض هذا الجهاز أو إيقافه من المسؤول';
+        break;
+      case 'error':
+        icon = Icons.wifi_off;
+        title = 'تعذر الاتصال بالإنترنت';
+        break;
+      default:
+        icon = Icons.sync;
+        title = 'جاري التحقق...';
+    }
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 72, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(height: 16),
+              Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              Text('المحل: ${Store.user}'),
+              Text('كود الجهاز: $code', textDirection: TextDirection.ltr),
+              const SizedBox(height: 20),
+              if (status != 'checking')
+                FilledButton.icon(
+                  onPressed: () => _check(force: true),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('تحديث الحالة'),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
