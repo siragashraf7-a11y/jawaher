@@ -205,7 +205,10 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) Updater.check();
+      if (mounted) {
+        Updater.check();
+        PriceBook.load();
+      }
     });
   }
 
@@ -1612,6 +1615,7 @@ class _SellScreenState extends State<SellScreen> {
       body: PageList(
         padding: const EdgeInsets.all(16),
         children: [
+          PricesCard(metal: widget.metal),
           const Text('إضافة منتج للعملية', style: TextStyle(fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           ItemPicker(
@@ -1816,9 +1820,8 @@ class _BuyScreenState extends State<BuyScreen> {
   /// سعر السوق للشراء (للوزن الحالي)
   double? get marketBuy {
     final k = mode == 0 ? old?.karat : karat;
-    if (k == null || weight <= 0) return null;
-    final bp = Prices.buy(widget.metal, k);
-    return bp == null ? null : bp * weight;
+    if (k == null) return null;
+    return Prices.buy(widget.metal, k);
   }
 
   void _onCount(String v) {
@@ -1859,8 +1862,9 @@ class _BuyScreenState extends State<BuyScreen> {
     }
     if (ws.length != cn) return _msg('اكتب وزن كل القطع');
     final wt = ws.fold<double>(0.0, (a, b) => a + b);
-    final pr = parseNum(price);
-    if (pr == null || pr <= 0) return _msg('اكتب سعر الشراء للمنتج ده');
+    final ppg = parseNum(price);
+    if (ppg == null || ppg <= 0) return _msg('اكتب سعر الجرام');
+    final pr = ppg * wt;
     cart.add(BuyLine(
       existing: mode == 0 ? o : null,
       karat: mode == 0 ? o!.karat : karat,
@@ -2006,14 +2010,16 @@ class _BuyScreenState extends State<BuyScreen> {
             ],
           ),
           const SizedBox(height: 8),
-          tf('سعر شراء المنتج ده', price),
+          tf('سعر الجرام', price, onChanged: () => setState(() {})),
+          Text('إجمالي سعر المنتج ده: ${money((parseNum(price) ?? 0.0) * weight)}',
+              style: const TextStyle(fontWeight: FontWeight.bold)),
           if (mb != null)
             Align(
               alignment: AlignmentDirectional.centerStart,
               child: TextButton.icon(
                 onPressed: () => setState(() => price.text = mb.toStringAsFixed(0)),
                 icon: const Icon(Icons.show_chart),
-                label: Text('سعر السوق: ${mb.toStringAsFixed(0)}'),
+                label: Text('سعر السوق للجرام: ${mb.toStringAsFixed(0)}'),
               ),
             ),
           OutlinedButton.icon(
@@ -3334,6 +3340,12 @@ const List<List<String>> _dict = [
   ['اكتب وزن كل القطع', 'Enter every piece weight', 'Gewicht jedes Stücks eingeben', 'Saisir le poids de chaque pièce', 'Inserisci il peso di ogni pezzo', 'Ingrese el peso de cada pieza'],
   ['سعر السوق', 'Market price', 'Marktpreis', 'Prix du marché', 'Prezzo di mercato', 'Precio de mercado'],
   ['عدد النسخ لكل ملصق', 'Copies per label', 'Kopien pro Etikett', 'Copies par étiquette', 'Copie per etichetta', 'Copias por etiqueta'],
+  ['إجمالي سعر المنتج ده', 'Total price of this item', 'Gesamtpreis dieses Artikels', 'Prix total de cet article', 'Prezzo totale di questo articolo', 'Precio total de este artículo'],
+  ['استخدم هذا المصدر', 'Use this source', 'Diese Quelle verwenden', 'Utiliser cette source', 'Usa questa fonte', 'Usar esta fuente'],
+  ['المستخدم', 'in use', 'in Verwendung', 'utilisé', 'in uso', 'en uso'],
+  ['تعديل الأسعار', 'Edit prices', 'Preise bearbeiten', 'Modifier les prix', 'Modifica prezzi', 'Editar precios'],
+  ['السعر العالمي (لحظي)', 'World price (live)', 'Weltmarktpreis (live)', 'Prix mondial (direct)', 'Prezzo mondiale (live)', 'Precio mundial (en vivo)'],
+  ['سعر السوق للجرام', 'Market price per gram', 'Marktpreis pro Gramm', 'Prix du marché par gramme', 'Prezzo di mercato al grammo', 'Precio de mercado por gramo'],
   ['تعيين الفرع لكل المنتجات القديمة', 'Set branch on all old products', 'Filiale für alte Produkte setzen', 'Définir la succursale', 'Imposta filiale', 'Asignar sucursal'],
 ];
 
@@ -3404,9 +3416,7 @@ class Prefs {
   static String branch = '';
   static String deviceId = '';
   static bool approved = false;
-  static double premium = 0.0;
-  static double sellMargin = 1.0;
-  static double buyMargin = 1.0;
+  static String priceSource = 'world';
   static double targetGold = 0.0;
   static double targetSilver = 0.0;
 
@@ -3420,9 +3430,7 @@ class Prefs {
     paper = p.getString('paper') ?? paper;
     branch = p.getString('branch') ?? '';
     approved = p.getBool('approved') ?? false;
-    premium = p.getDouble('premium') ?? 0.0;
-    sellMargin = p.getDouble('sellMargin') ?? 1.0;
-    buyMargin = p.getDouble('buyMargin') ?? 1.0;
+    priceSource = p.getString('priceSource') ?? 'world';
     var id = p.getString('deviceId');
     if (id == null || id.isEmpty) {
       final r = math.Random.secure();
@@ -3444,9 +3452,7 @@ class Prefs {
     await p.setString('paper', paper);
     await p.setString('branch', branch);
     await p.setBool('approved', approved);
-    await p.setDouble('premium', premium);
-    await p.setDouble('sellMargin', sellMargin);
-    await p.setDouble('buyMargin', buyMargin);
+    await p.setString('priceSource', priceSource);
     await p.setDouble('targetGold', targetGold);
     await p.setDouble('targetSilver', targetSilver);
     await p.setString('lang', appLang.value);
@@ -3737,9 +3743,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final phone = TextEditingController(text: Prefs.shopPhone);
   final address = TextEditingController(text: Prefs.shopAddress);
   final branch = TextEditingController(text: Prefs.branch);
-  final premium = TextEditingController(text: '${Prefs.premium}');
-  final sellM = TextEditingController(text: '${Prefs.sellMargin}');
-  final buyM = TextEditingController(text: '${Prefs.buyMargin}');
   final tGold = TextEditingController(text: Prefs.targetGold > 0 ? Prefs.targetGold.toStringAsFixed(0) : '');
   final tSilver = TextEditingController(text: Prefs.targetSilver > 0 ? Prefs.targetSilver.toStringAsFixed(0) : '');
   String paper = Prefs.paper;
@@ -3749,9 +3752,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     Prefs.shopPhone = phone.text.trim();
     Prefs.shopAddress = address.text.trim();
     Prefs.branch = branch.text.trim();
-    Prefs.premium = parseNum(premium) ?? 0.0;
-    Prefs.sellMargin = parseNum(sellM) ?? 0.0;
-    Prefs.buyMargin = parseNum(buyM) ?? 0.0;
     Prefs.paper = paper;
     Prefs.targetGold = parseNum(tGold) ?? 0.0;
     Prefs.targetSilver = parseNum(tSilver) ?? 0.0;
@@ -3805,9 +3805,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             label: const Text('تعيين الفرع لكل المنتجات القديمة'),
           ),
           const SizedBox(height: 12),
-          tf('نسبة فرق السوق المحلي عن العالمي % (+ أو -)', premium),
-          tf('هامش البيع % (فوق السعر)', sellM),
-          tf('هامش الشراء % (تحت السعر)', buyM),
           DropdownButtonFormField<String>(
             value: paper,
             decoration: const InputDecoration(label: Text('مقاس ورق الطباعة'), border: OutlineInputBorder()),
@@ -4871,7 +4868,28 @@ class PriceData {
   PriceData(this.xau, this.xag, this.usdEgp, this.at);
 }
 
+/// مصادر الأسعار: العالمي لحظي تلقائي، والباقي بتسجّل أسعارهم يدوي (جدول لكل مصدر)
+const List<(String, String)> priceSources = [
+  ('world', 'السعر العالمي (لحظي)'),
+  ('isagha', 'iSagha'),
+  ('edahab', 'eDahab'),
+  ('souq', 'سوق الدهب'),
+  ('bullion', 'Gold Bullion'),
+];
+
+String sourceName(String id) {
+  for (final s in priceSources) {
+    if (s.$1 == id) return s.$2;
+  }
+  return id;
+}
+
 class Prices {
+  // نسب ثابتة مش بتظهر ولا بتتغير
+  static const double premium = 0.0;
+  static const double sellMargin = 0.4;
+  static const double buyMargin = 0.55;
+
   static final ValueNotifier<PriceData?> state = ValueNotifier<PriceData?>(null);
   static Timer? _t;
   static bool _busy = false;
@@ -4893,6 +4911,7 @@ class Prices {
   }
 
   static Future<void> refresh() async {
+    PriceBook.load();
     if (_busy) return;
     _busy = true;
     try {
@@ -4906,7 +4925,7 @@ class Prices {
       error = '';
     } catch (e) {
       error = '$e';
-      state.value = state.value; // يبلّغ المستمعين بالخطأ
+      PriceBook.tick.value++;
     } finally {
       _busy = false;
     }
@@ -4917,72 +4936,201 @@ class Prices {
     if (d == null) return null;
     final oz = metal == 'gold' ? d.xau : d.xag;
     final purity = metal == 'gold' ? karat / 24 : karat / 1000;
-    return oz / 31.1035 * d.usdEgp * purity * (1 + Prefs.premium / 100);
+    return oz / 31.1035 * d.usdEgp * purity * (1 + premium / 100);
   }
 
-  /// سعر بيع الجرام للعميل
-  static double? sell(String metal, int karat) {
+  static double? priceOf(String src, String metal, int karat, String kind) {
+    if (src != 'world') return PriceBook.get(src, metal, karat, kind);
     final g = _gram(metal, karat);
-    return g == null ? null : g * (1 + Prefs.sellMargin / 100);
+    if (g == null) return null;
+    return kind == 'sell' ? g * (1 + sellMargin / 100) : g * (1 - buyMargin / 100);
   }
 
-  /// سعر شراء الجرام من العميل
-  static double? buy(String metal, int karat) {
-    final g = _gram(metal, karat);
-    return g == null ? null : g * (1 - Prefs.buyMargin / 100);
+  /// سعر بيع الجرام للعميل (من المصدر المختار)
+  static double? sell(String metal, int karat) => priceOf(Prefs.priceSource, metal, karat, 'sell');
+
+  /// سعر شراء الجرام من العميل (من المصدر المختار)
+  static double? buy(String metal, int karat) => priceOf(Prefs.priceSource, metal, karat, 'buy');
+}
+
+/// أسعار المصادر اللي بتتسجل يدوي، متخزنة في السحابة فبتظهر على كل الأجهزة
+class PriceBook {
+  static final ValueNotifier<int> tick = ValueNotifier<int>(0);
+  static Map<String, dynamic> _data = {};
+
+  static Future<void> load() async {
+    if (Store.user.isEmpty) return;
+    try {
+      final d = await Ops.col('meta').doc('prices').get().timeout(const Duration(seconds: 8));
+      _data = d.data() ?? <String, dynamic>{};
+      tick.value++;
+    } catch (_) {}
+  }
+
+  static double? get(String src, String metal, int karat, String kind) {
+    final m = _data['${src}_$metal'];
+    if (m is Map) {
+      final k = m['$karat'];
+      if (k is Map) {
+        final v = k[kind];
+        if (v is num) return v.toDouble();
+      }
+    }
+    return null;
+  }
+
+  static DateTime? updated(String src, String metal) {
+    final m = _data['${src}_$metal'];
+    if (m is Map && m['at'] is Timestamp) return (m['at'] as Timestamp).toDate();
+    return null;
+  }
+
+  static void save(String src, String metal, Map<int, (double?, double?)> vals) {
+    final m = <String, dynamic>{'at': Timestamp.now()};
+    vals.forEach((k, v) {
+      m['$k'] = {'buy': v.$1, 'sell': v.$2};
+    });
+    Ops.col('meta').doc('prices').set({'${src}_$metal': m}, SetOptions(merge: true));
+    _data = {..._data, '${src}_$metal': m};
+    tick.value++;
   }
 }
 
+Future<void> editSourcePrices(BuildContext context, String src, String metal) async {
+  final ks = karatsOf(metal);
+  String initial(String kind, int k) {
+    final v = PriceBook.get(src, metal, k, kind);
+    return v == null ? '' : v.toStringAsFixed(0);
+  }
+
+  final buy = {for (final k in ks) k: TextEditingController(text: initial('buy', k))};
+  final sell = {for (final k in ks) k: TextEditingController(text: initial('sell', k))};
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: Text('أسعار ${sourceName(src)} - ${metalNames[metal]}'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final k in ks)
+              Row(
+                children: [
+                  SizedBox(width: 64, child: Text('عيار $k')),
+                  Expanded(child: tf('شراء', buy[k]!)),
+                  const SizedBox(width: 8),
+                  Expanded(child: tf('بيع', sell[k]!)),
+                ],
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('إلغاء')),
+        FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('حفظ')),
+      ],
+    ),
+  );
+  if (ok == true) {
+    PriceBook.save(src, metal, {for (final k in ks) k: (parseNum(buy[k]!), parseNum(sell[k]!))});
+  }
+}
+
+String _pf(double? v) => v == null ? '-' : v.toStringAsFixed(0);
+
+/// جدول سعر مصدر واحد
+class _SourceTable extends StatelessWidget {
+  final String metal, src;
+  const _SourceTable({required this.metal, required this.src});
+
+  @override
+  Widget build(BuildContext context) {
+    const bold = TextStyle(fontWeight: FontWeight.bold);
+    final upd = src == 'world' ? Prices.state.value?.at : PriceBook.updated(src, metal);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(children: [
+          Expanded(child: Text('عيار', style: bold)),
+          Expanded(child: Text('شراء', style: bold)),
+          Expanded(child: Text('بيع', style: bold)),
+        ]),
+        for (final k in karatsOf(metal))
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Row(children: [
+              Expanded(child: Text('$k')),
+              Expanded(child: Text(_pf(Prices.priceOf(src, metal, k, 'buy')))),
+              Expanded(child: Text(_pf(Prices.priceOf(src, metal, k, 'sell')))),
+            ]),
+          ),
+        if (upd != null)
+          Text('آخر تحديث: ${_two(upd.hour)}:${_two(upd.minute)}', style: const TextStyle(fontSize: 11))
+        else
+          Text(src == 'world'
+              ? (Prices.error.isEmpty ? 'جاري التحميل...' : 'تعذر جلب الأسعار')
+              : 'لسه ما اتسجلتش أسعار المصدر ده، اضغط تعديل', style: const TextStyle(fontSize: 11)),
+      ],
+    );
+  }
+}
+
+/// كارت مصغّر بالمصدر المختار (للشاشات التانية)
 class PricesCard extends StatelessWidget {
   final String metal;
   const PricesCard({super.key, required this.metal});
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<PriceData?>(
-      valueListenable: Prices.state,
-      builder: (context, d, _) {
-        const bold = TextStyle(fontWeight: FontWeight.bold);
-        return Card(
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(child: Text('أسعار ${metalNames[metal]} (جنيه / جرام)', style: bold)),
-                    IconButton(icon: const Icon(Icons.refresh), onPressed: Prices.refresh),
-                  ],
-                ),
-                if (d == null)
-                  Text(Prices.error.isEmpty ? 'جاري التحميل...' : 'تعذر جلب الأسعار')
-                else ...[
-                  const Row(children: [
-                    Expanded(child: Text('عيار', style: bold)),
-                    Expanded(child: Text('شراء', style: bold)),
-                    Expanded(child: Text('بيع', style: bold)),
-                  ]),
-                  for (final k in karatsOf(metal))
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 3),
-                      child: Row(children: [
-                        Expanded(child: Text('$k')),
-                        Expanded(child: Text((Prices.buy(metal, k) ?? 0.0).toStringAsFixed(0))),
-                        Expanded(child: Text((Prices.sell(metal, k) ?? 0.0).toStringAsFixed(0))),
-                      ]),
-                    ),
-                  Text('آخر تحديث: ${_two(d.at.hour)}:${_two(d.at.minute)}', style: const TextStyle(fontSize: 11)),
+    return ValueListenableBuilder<int>(
+      valueListenable: PriceBook.tick,
+      builder: (context, _, __) => ValueListenableBuilder<PriceData?>(
+        valueListenable: Prices.state,
+        builder: (context, d, ___) {
+          final src = Prefs.priceSource;
+          return Card(
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text('أسعار ${metalNames[metal]} (جنيه / جرام)',
+                            style: const TextStyle(fontWeight: FontWeight.bold)),
+                      ),
+                      if (src != 'world')
+                        IconButton(
+                          tooltip: 'تعديل الأسعار',
+                          icon: const Icon(Icons.edit),
+                          onPressed: () => editSourcePrices(context, src, metal),
+                        ),
+                      IconButton(icon: const Icon(Icons.refresh), onPressed: Prices.refresh),
+                    ],
+                  ),
+                  DropdownButton<String>(
+                    value: src,
+                    isExpanded: true,
+                    items: [for (final s in priceSources) DropdownMenuItem(value: s.$1, child: Text(s.$2))],
+                    onChanged: (v) {
+                      Prefs.priceSource = v ?? 'world';
+                      Prefs.save();
+                      PriceBook.tick.value++;
+                    },
+                  ),
+                  _SourceTable(metal: metal, src: src),
                 ],
-              ],
+              ),
             ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }
 
+/// صفحة فيها جدول لكل مصدر، والتاجر يختار يستخدم أنهي واحد
 class PricesScreen extends StatelessWidget {
   final String metal;
   const PricesScreen({super.key, required this.metal});
@@ -4991,19 +5139,76 @@ class PricesScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('أسعار السوق')),
-      body: PageList(
-        padding: const EdgeInsets.all(12),
-        children: [
-          PricesCard(metal: metal),
-          const Padding(
-            padding: EdgeInsets.all(8),
-            child: Text(
-              'الأسعار محسوبة من سعر البورصة العالمية للأونصة × سعر الدولار بالجنيه، وبتتحدّث كل دقيقة. '
-              'سوق الصاغة في مصر ممكن يختلف عنها شوية، فعدّل نسبة الفرق وهامش الشراء والبيع من الإعدادات.',
-              style: TextStyle(fontSize: 12),
-            ),
-          ),
-        ],
+      body: ValueListenableBuilder<int>(
+        valueListenable: PriceBook.tick,
+        builder: (context, _, __) => ValueListenableBuilder<PriceData?>(
+          valueListenable: Prices.state,
+          builder: (context, d, ___) {
+            final sel = Prefs.priceSource;
+            return PageList(
+              padding: const EdgeInsets.all(12),
+              children: [
+                for (final s in priceSources)
+                  Card(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(
+                        color: s.$1 == sel ? Theme.of(context).colorScheme.primary : Colors.transparent,
+                        width: 2,
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(s.$1 == sel ? Icons.check_circle : Icons.circle_outlined,
+                                  color: Theme.of(context).colorScheme.primary),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text('${s.$2}${s.$1 == sel ? '  (المستخدم)' : ''}',
+                                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                              ),
+                              if (s.$1 != 'world')
+                                IconButton(
+                                  tooltip: 'تعديل الأسعار',
+                                  icon: const Icon(Icons.edit),
+                                  onPressed: () => editSourcePrices(context, s.$1, metal),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          _SourceTable(metal: metal, src: s.$1),
+                          if (s.$1 != sel)
+                            Align(
+                              alignment: AlignmentDirectional.centerEnd,
+                              child: FilledButton.tonal(
+                                onPressed: () {
+                                  Prefs.priceSource = s.$1;
+                                  Prefs.save();
+                                  PriceBook.tick.value++;
+                                },
+                                child: const Text('استخدم هذا المصدر'),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                const Padding(
+                  padding: EdgeInsets.all(8),
+                  child: Text(
+                    'السعر العالمي بيتحدّث لوحده كل دقيقة. باقي المصادر بتسجّل أسعارها بإيدك من زرار التعديل '
+                    'وبتظهر على كل الأجهزة. السعر المستخدم هو اللي بيتملّا تلقائي في البيع والشراء.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
