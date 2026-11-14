@@ -70,6 +70,21 @@ jobs:
           if [ -f android/app/build.gradle ]; then
             sed -i '0,/^android {/s//android {\n    lintOptions {\n        checkReleaseBuilds false\n        abortOnError false\n    }/' android/app/build.gradle
           fi
+      - name: R8 rules (ML Kit text recognition)
+        run: |
+          cat > android/app/proguard-rules.pro <<'EOF'
+          -dontwarn com.google.mlkit.vision.text.chinese.**
+          -dontwarn com.google.mlkit.vision.text.devanagari.**
+          -dontwarn com.google.mlkit.vision.text.japanese.**
+          -dontwarn com.google.mlkit.vision.text.korean.**
+          EOF
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i '0,/release {/s//release {\n            proguardFiles("proguard-rules.pro")/' android/app/build.gradle.kts
+          fi
+          if [ -f android/app/build.gradle ]; then
+            sed -i "0,/release {/s//release {\n            proguardFiles 'proguard-rules.pro'/" android/app/build.gradle
+          fi
+          grep -n -A4 "release {" android/app/build.gradle.kts android/app/build.gradle 2>/dev/null || true
       - name: Brand name and icon
         run: |
           sed -i 's/android:label="gold_shop"/android:label="Infinity System"/' android/app/src/main/AndroidManifest.xml || true
